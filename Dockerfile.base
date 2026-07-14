@@ -1,0 +1,23 @@
+# kata-tee-runner base image — the generic, subnet-blind sealed room.
+#
+# A subnet builds its runner FROM this image, adds its profile module, and sets
+# KATA_TEE_PROFILE=<module>:<Class> (see a subnet's runner Dockerfile). This base names
+# no subnet and does not run on its own (it needs a profile).
+FROM python:3.12-slim
+# The docker CLI (static binary) so the room can pull + run the problem image inside the room.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz -o /tmp/d.tgz \
+    && tar -xzf /tmp/d.tgz -C /usr/local/bin --strip-components=1 docker/docker \
+    && rm /tmp/d.tgz \
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY room/ ./room/
+# relay.py is the vendored generic model-pinning relay (gitignored; provided at build time —
+# source-of-truth relocation is §6 of KATA-TEE-RUNNER-PLAN.md).
+COPY relay.py .
+EXPOSE 8080
+CMD ["python", "-m", "room.server"]
