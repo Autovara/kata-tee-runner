@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
+import kata_seal
 from room import sealing
 from room.bundle import credential_bundle_binding
 
@@ -68,3 +70,36 @@ def test_credential_binding_ignores_transient_local_artifacts(tmp_path: Path) ->
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
 
     assert credential_bundle_binding(bundle) == expected
+
+
+def test_credential_binding_includes_submission_metadata(tmp_path: Path) -> None:
+    bundle = tmp_path / "submission"
+    bundle.mkdir()
+    (bundle / "agent.py").write_text("def agent_main(): pass\n", encoding="utf-8")
+    (bundle / "submission.json").write_text('{"submission_id":"first"}\n', encoding="utf-8")
+    initial = credential_bundle_binding(bundle)
+
+    (bundle / "submission.json").write_text('{"submission_id":"second"}\n', encoding="utf-8")
+
+    assert credential_bundle_binding(bundle) != initial
+
+
+def test_kata_seal_rejects_a_blank_api_key_before_contacting_the_room(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kata_seal.py",
+            "--room",
+            "https://room.example",
+            "--provider",
+            "akashml",
+            "--key",
+            "   ",
+            "--bundle",
+            "./submission",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="--key must not be empty"):
+        kata_seal.main()

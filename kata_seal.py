@@ -101,6 +101,8 @@ def main() -> None:
     args = ap.parse_args()
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", args.provider):
         raise SystemExit("ERROR: --provider must use lowercase letters, digits, _ or -.")
+    if not args.key.strip():
+        raise SystemExit("ERROR: --key must not be empty or whitespace only.")
 
     info = fetch_pubkey(args.room)
     pubkey = info["pubkey"]
