@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from room import sealing
+from room.bundle import credential_bundle_binding
 
 
 def _credential(**changes) -> str:
@@ -49,3 +51,20 @@ def test_inference_free_submission_has_no_platform_fallback() -> None:
     assert sealing.resolve_miner_credential(required=False) is None
     with pytest.raises(RuntimeError, match="no sealed miner credential"):
         sealing.resolve_miner_credential()
+
+
+def test_credential_binding_ignores_transient_local_artifacts(tmp_path: Path) -> None:
+    bundle = tmp_path / "submission"
+    bundle.mkdir()
+    (bundle / "agent.py").write_text("def agent_main(): pass\n", encoding="utf-8")
+    expected = credential_bundle_binding(bundle)
+
+    cache = bundle / "__pycache__"
+    cache.mkdir()
+    (cache / "agent.cpython-313.pyc").write_bytes(b"compiled-agent")
+    (bundle / "helper.pyo").write_bytes(b"optimized-agent")
+    git_dir = bundle / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    assert credential_bundle_binding(bundle) == expected

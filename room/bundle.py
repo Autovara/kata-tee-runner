@@ -15,6 +15,8 @@ DEFAULT_MAX_EXTRACTED_BYTES = 256 * 1024
 DEFAULT_MAX_FILES = 16
 SEALED_CREDENTIAL_FILENAME = "sealed_inference_key"
 _BUNDLE_BINDING_DOMAIN = b"kata-miner-credential-bundle-v1\0"
+_TRANSIENT_BUNDLE_DIRS = frozenset({".git", "__pycache__"})
+_TRANSIENT_BUNDLE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
 def _positive_env(name: str, default: int) -> int:
@@ -64,8 +66,11 @@ def credential_bundle_binding(bundle_root: Path) -> str:
     """Return the stable hash to which a miner seals a provider credential.
 
     The public ciphertext file is intentionally excluded so the miner can hash
-    the bundle before creating it.  Every executable bundle file is included,
-    making a ciphertext unusable with a substituted agent or helper file.
+    the bundle before creating it. Generated Python caches and VCS metadata are
+    excluded too: subnet packers do not transmit them, and they must not make a
+    valid credential fail merely because a miner ran the agent locally. Every
+    submitted executable bundle file is included, making a ciphertext unusable
+    with a substituted agent or helper file.
     """
 
     if not bundle_root.is_dir():
@@ -77,7 +82,7 @@ def credential_bundle_binding(bundle_root: Path) -> str:
         if not path.is_file() or path.is_symlink():
             raise RuntimeError("credential binding accepts regular bundle files only")
         relative = path.relative_to(bundle_root).as_posix()
-        if relative == SEALED_CREDENTIAL_FILENAME:
+        if _exclude_from_credential_binding(relative):
             continue
         encoded_path = relative.encode("utf-8")
         content = path.read_bytes()
@@ -86,3 +91,13 @@ def credential_bundle_binding(bundle_root: Path) -> str:
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()
+
+
+def _exclude_from_credential_binding(relative_path: str) -> bool:
+    """Keep credential hashing aligned with the submission bundle sent to a room."""
+    path = Path(relative_path)
+    return (
+        relative_path == SEALED_CREDENTIAL_FILENAME
+        or path.suffix in _TRANSIENT_BUNDLE_SUFFIXES
+        or any(part in _TRANSIENT_BUNDLE_DIRS for part in path.parts)
+    )

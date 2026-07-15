@@ -47,10 +47,11 @@ rejected by the supplied build/deploy configuration.
 room accepts only short-lived requests and reserves every nonce before execution, preventing replay.
 The quote binds `report`, `bundle_sha256`, and immutable profile provenance to the nonce and project.
 Before invoking a profile, the room bounds and extracts the candidate bundle, then verifies the
-encrypted descriptor's `bundle_binding` against every bundle file except the ciphertext itself. A
-validator therefore cannot take the public ciphertext from a PR and run it with a substituted agent
-to expose the key. Profiles must never fall back to an operator-supplied inference key: the sealed
-credential in each request is the sole key source.
+encrypted descriptor's `bundle_binding` against every submitted bundle file except the ciphertext
+itself and transient local files (`__pycache__`, `.pyc`, `.pyo`, and `.git`). A validator therefore
+cannot take the public ciphertext from a PR and run it with a substituted agent to expose the key.
+Profiles must never fall back to an operator-supplied inference key: the sealed credential in each
+request is the sole key source.
 
 ## Miner-funded inference routes
 
