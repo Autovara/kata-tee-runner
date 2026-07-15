@@ -15,6 +15,11 @@ case "$PYTHON_BASE" in
   *) echo "ERROR: PYTHON_BASE must be an immutable image digest (...@sha256:...)" >&2; exit 1 ;;
 esac
 
+case "${2:-}" in
+  ""|--push) ;;
+  *) echo "ERROR: usage: ./build.sh <tag> [--push]" >&2; exit 1 ;;
+esac
+
 docker build --build-arg PYTHON_BASE="$PYTHON_BASE" -f Dockerfile.base -t "$IMAGE" .
 echo "built $IMAGE"
 [ "${2:-}" = "--push" ] && docker push "$IMAGE"
