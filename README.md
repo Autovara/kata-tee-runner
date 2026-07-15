@@ -19,6 +19,7 @@ room/                 the generic core
   profile.py          the TeeJobProfile seam a subnet implements
 kata_seal.py step0_check.py verify_run.py   miner/operator tools
 Dockerfile.base       the base image (a subnet builds FROM it)
+pyproject.toml        runtime and development dependencies
 ```
 
 ## The profile seam
@@ -47,5 +48,20 @@ The quote binds `report`, `bundle_sha256`, and immutable profile provenance to t
 Profiles must never fall back to an operator-supplied inference key: the sealed key in each request
 is the sole key source. Candidate bundles are bounded before extraction.
 
-`inference_gateway.py` is vendored at build time so subnet runner images use the reviewed gateway
-source that matches their deployment configuration.
+## Miner-funded inference routes
+
+`room/inference_gateway.py` is part of this generic runner. A subnet configures provider routes
+in its deployment, but never needs to copy or modify runner security code:
+
+- Set `KATA_INFERENCE_GATEWAY_UPSTREAM` for an OpenAI-compatible proxy. The gateway passes the
+  miner's key in `x-inference-api-key` and preserves the request body.
+- Or set both `KATA_INFERENCE_GATEWAY_DIRECT_KEY_PREFIXES` and
+  `KATA_INFERENCE_GATEWAY_DIRECT_UPSTREAM` for a direct provider. The prefix list controls which
+  miner keys use that route; `*` means every miner key. Configure the optional auth-header/template
+  variables when the provider does not use `Authorization: Bearer <key>`.
+
+At least one matching route is required. A missing miner key is rejected before any provider call.
+The gateway permits only inference traffic from agents; it does not select models, limit tokens or
+calls, track cost, or provide a validator-funded fallback. Runtime billing remains the deployment
+platform's responsibility: a production operator must use a provider/TEE deployment that charges
+the miner before forwarding a job to this room.

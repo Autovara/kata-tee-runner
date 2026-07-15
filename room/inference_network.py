@@ -35,9 +35,7 @@ def ghcr_login():
     user = os.environ.get("GHCR_USER", "")
     token = os.environ.get("GHCR_TOKEN", "")
     if not user or not token:
-        raise RuntimeError(
-            "GHCR_USER / GHCR_TOKEN not set (needed to pull the problem image)"
-        )
+        raise RuntimeError("GHCR_USER / GHCR_TOKEN not set (needed to pull the problem image)")
     process = docker(["login", GHCR, "-u", user, "--password-stdin"], stdin=token)
     if process.returncode != 0:
         raise RuntimeError(f"ghcr login failed: {process.stderr[:300]}")
@@ -45,12 +43,12 @@ def ghcr_login():
 
 
 def start_inference_gateway_once():
-    """Start the vendored miner-funded gateway on the runner container."""
+    """Start the built-in miner-funded gateway on the runner container."""
     global _gateway_process
     if _gateway_process is not None and _gateway_process.poll() is None:
         return
     _gateway_process = subprocess.Popen(
-        [sys.executable, "/app/inference_gateway.py"],
+        [sys.executable, "-m", "room.inference_gateway"],
         env={
             **os.environ,
             "KATA_INFERENCE_GATEWAY_HOST": "0.0.0.0",
@@ -65,9 +63,7 @@ def ensure_inference_network_once():
     global _inference_network_ready
     if _inference_network_ready:
         return
-    docker(
-        ["network", "create", "--internal", INF_NET]
-    )  # Ignore already-exists failures.
+    docker(["network", "create", "--internal", INF_NET])  # Ignore already-exists failures.
     own_container = socket.gethostname()
     docker(
         [

@@ -1,9 +1,10 @@
 """The generic sealed-room HTTP service — subnet-blind.
 
-The room handles sealing, the miner-funded inference gateway + sealed network, attestation, and these
-endpoints. The subnet-specific execution is a *profile* (implements ``room.profile.TeeJobProfile``)
+The room handles sealing, the miner-funded inference gateway, the sealed network,
+attestation, and these endpoints. The subnet-specific execution is a *profile*
+(implements ``room.profile.TeeJobProfile``)
 loaded at startup from ``KATA_TEE_PROFILE=<module>:<Class>`` — so this base names no subnet. A
-subnet image sets that env and adds its profile module (see kata-tee-runner-plan §2).
+subnet image sets that environment variable and adds its profile module.
 
 Two modes on /run, chosen by project_key:
   * project_key == profile.fixture_project  -> the profile's no-docker plumbing stub.
@@ -12,9 +13,13 @@ Two modes on /run, chosen by project_key:
 Both return: the answer (report) + an attestation quote whose report-data BINDS the answer +
 project + round nonce.
 
-Secrets arrive as sealed env vars (delivered to the attested room; NEVER hardcoded):
+Deployment secrets arrive as sealed environment variables (delivered to the
+attested room; never hardcoded):
   GHCR_USER, GHCR_TOKEN  -- registry login to pull the private problem image
-  INFERENCE_API_KEY      -- the miner's sealed inference key
+
+Each miner's provider key is instead supplied as ``sealed_key`` in its signed
+``/run`` request. The room decrypts it only for that job and passes it to the
+subnet profile; it is never a runner-wide environment variable.
 """
 
 import binascii
@@ -29,9 +34,9 @@ from flask import Flask, jsonify, request
 
 from room import auth, sealing
 from room.attest import bind_and_quote
-from room.profile import TeeJobResult
-from room.dstack import client
+from room.dstack import get_client
 from room.inference_network import docker, ghcr_login
+from room.profile import TeeJobResult
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(
@@ -73,7 +78,7 @@ def pubkey():
         sk = sealing.sealing_privkey()
         pk = PublicKey.from_secret(sk).format(compressed=True).hex()
         rd = hashlib.sha256(b"kata-sealing-pubkey:" + bytes.fromhex(pk)).digest()
-        q = client.get_quote(rd)
+        q = get_client().get_quote(rd)
         return jsonify(pubkey=pk, quote=q.quote, event_log=q.event_log)
     except Exception as exc:  # noqa: BLE001
         return jsonify(error=str(exc), where=traceback.format_exc()[-1200:]), 500
@@ -89,9 +94,7 @@ def pull_test():
     }:
         return jsonify(error="diagnostics are disabled"), 404
     if not auth.is_configured():
-        return jsonify(
-            error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"
-        ), 503
+        return jsonify(error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"), 503
     raw = request.get_data()
     if not auth.verify(raw, request.headers.get(auth.SIGNATURE_HEADER, "")):
         return jsonify(error="unauthorized"), 401
@@ -105,14 +108,10 @@ def pull_test():
         proc = docker(["pull", image])
         if proc.returncode != 0:
             return jsonify(ok=False, image=image, error=proc.stderr[:600]), 502
-        digest = docker(
-            ["inspect", "--format", "{{index .RepoDigests 0}}", image]
-        ).stdout.strip()
+        digest = docker(["inspect", "--format", "{{index .RepoDigests 0}}", image]).stdout.strip()
         return jsonify(ok=True, image=image, digest=digest)
     except Exception as exc:  # noqa: BLE001
-        return jsonify(
-            ok=False, error=str(exc), where=traceback.format_exc()[-1200:]
-        ), 500
+        return jsonify(ok=False, error=str(exc), where=traceback.format_exc()[-1200:]), 500
 
 
 @app.route("/run", methods=["POST"])
@@ -120,9 +119,7 @@ def run():
     # /run runs a caller-supplied agent with a decrypted key injected, so it is authenticated and
     # POST-only. Fail closed if no shared secret is configured; reject a missing/invalid signature.
     if not auth.is_configured():
-        return jsonify(
-            error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"
-        ), 503
+        return jsonify(error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"), 503
     raw = request.get_data()
     if not auth.verify(raw, request.headers.get(auth.SIGNATURE_HEADER, "")):
         return jsonify(error="unauthorized"), 401
@@ -154,12 +151,8 @@ def _run(raw: bytes):
         return jsonify(error="nonce must be hex"), 400
     if not (8 <= len(nonce) <= 32):
         return jsonify(error="nonce must be 8..32 bytes of hex"), 400
-    if not isinstance(bundle_sha256, str) or not re.fullmatch(
-        r"[0-9a-f]{64}", bundle_sha256
-    ):
-        return jsonify(
-            error="bundle_sha256 must be a lowercase SHA-256 hex digest"
-        ), 400
+    if not isinstance(bundle_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_sha256):
+        return jsonify(error="bundle_sha256 must be a lowercase SHA-256 hex digest"), 400
     if not auth.REPLAY_GUARD.reserve(
         nonce_hex,
         expires_at=int(body[auth.EXPIRES_AT_FIELD]),
@@ -174,9 +167,7 @@ def _run(raw: bytes):
         bundle_sha256=bundle_sha256,
     )
     if not isinstance(result, TeeJobResult):
-        raise RuntimeError(
-            "TEE profile returned an invalid result; expected TeeJobResult"
-        )
+        raise RuntimeError("TEE profile returned an invalid result; expected TeeJobResult")
 
     answer_hash, binding_hash, report_data, quote = bind_and_quote(
         result.report,

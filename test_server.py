@@ -57,9 +57,7 @@ def test_bind_and_quote_binds_answer_project_and_nonce():
         binding_hash
         == hashlib.sha256(
             canonical(
-                binding_payload(
-                    report=report, bundle_sha256="ab" * 32, provenance=provenance
-                )
+                binding_payload(report=report, bundle_sha256="ab" * 32, provenance=provenance)
             )
         ).digest()
     )
@@ -82,9 +80,7 @@ def test_run_uses_the_loaded_profile_and_binds():
             )
         )
     ).digest()
-    report_data = hashlib.sha256(
-        bytes.fromhex(nonce) + b"proj-x" + binding_hash
-    ).digest()
+    report_data = hashlib.sha256(bytes.fromhex(nonce) + b"proj-x" + binding_hash).digest()
     assert data["report_data_sha256"] == report_data.hex()
     assert data["quote"] == "fake-quote:" + report_data.hex()
 
@@ -128,18 +124,13 @@ def test_run_rejects_unsigned_request():
     # No signature header -> 401. This is the fix for the key-exfil vuln: an attacker can't invoke
     # /run (so can't have a victim's sealed key decrypted into their agent).
     assert (
-        _post_run(
-            {"nonce": "cc" * 16, "project_key": "proj-x"}, signature=None
-        ).status_code
-        == 401
+        _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature=None).status_code == 401
     )
 
 
 def test_run_rejects_bad_signature():
     assert (
-        _post_run(
-            {"nonce": "cc" * 16, "project_key": "proj-x"}, signature="deadbeef"
-        ).status_code
+        _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature="deadbeef").status_code
         == 401
     )
 

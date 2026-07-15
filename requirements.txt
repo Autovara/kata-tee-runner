@@ -1,4 +1,0 @@
-flask>=3.0
-dstack-sdk
-eciespy
-coincurve

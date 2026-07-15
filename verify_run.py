@@ -55,9 +55,7 @@ def main() -> int:
         and report_data.hex() == data.get("report_data_sha256")
     )
     print("\nLocal match:", "PASS" if ok else "FAIL")
-    print(
-        "\nFinal check: on https://proof.t16z.com, confirm the quote's report_data =="
-    )
+    print("\nFinal check: on https://proof.t16z.com, confirm the quote's report_data ==")
     print("  ", report_data.hex())
     print("If it matches, the proof genuinely covers THIS answer.")
     return 0 if ok else 1

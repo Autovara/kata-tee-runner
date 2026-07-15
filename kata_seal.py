@@ -49,9 +49,7 @@ def verify_room(quote_hex: str, expected_measurement: str | None) -> tuple[str, 
         "SWHardeningNeeded",
         "ConfigurationAndSWHardeningNeeded",
     ):
-        raise SystemExit(
-            f"ERROR: room attestation is not valid (status={status}). Not sealing."
-        )
+        raise SystemExit(f"ERROR: room attestation is not valid (status={status}). Not sealing.")
     if expected_measurement and measurement != expected_measurement:
         raise SystemExit(
             f"ERROR: room measurement {measurement} != expected {expected_measurement}.\n"
@@ -101,9 +99,7 @@ def main() -> None:
     sealed = encrypt(pubkey, args.key.encode()).hex()
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(sealed)
-    print(
-        f"sealed key -> {args.out} ({len(sealed)} hex chars). Add this file to your PR."
-    )
+    print(f"sealed key -> {args.out} ({len(sealed)} hex chars). Add this file to your PR.")
 
 
 if __name__ == "__main__":

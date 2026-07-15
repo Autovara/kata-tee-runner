@@ -35,9 +35,7 @@ def is_configured() -> bool:
 
 def sign(body: bytes, secret: bytes | None = None) -> str:
     """HMAC-SHA256 hex of ``body`` (the raw request bytes) under the shared secret."""
-    return hmac.new(
-        secret if secret is not None else _secret(), body, sha256
-    ).hexdigest()
+    return hmac.new(secret if secret is not None else _secret(), body, sha256).hexdigest()
 
 
 def verify(body: bytes, signature: str) -> bool:
@@ -69,9 +67,7 @@ def request_clock_skew_seconds() -> int:
     return max(0, value)
 
 
-def validate_request_window(
-    payload: dict[str, object], *, now: int | None = None
-) -> str | None:
+def validate_request_window(payload: dict[str, object], *, now: int | None = None) -> str | None:
     """Validate the short-lived signed-request claims before a run is reserved."""
     try:
         issued_at = int(payload[ISSUED_AT_FIELD])
@@ -99,9 +95,7 @@ class ReplayGuard:
         self._seen: OrderedDict[str, int] = OrderedDict()
         self._lock = threading.Lock()
 
-    def reserve(
-        self, nonce_hex: str, *, expires_at: int, now: int | None = None
-    ) -> bool:
+    def reserve(self, nonce_hex: str, *, expires_at: int, now: int | None = None) -> bool:
         current = int(time.time()) if now is None else now
         with self._lock:
             while self._seen:

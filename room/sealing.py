@@ -1,14 +1,14 @@
 """Sealed-key handling (generic). The room holds a private sealing key bound to its image; a miner
 seals their inference key to the matching public key, so the owner only ever handles ciphertext."""
 
-from room.dstack import client
+from room.dstack import get_client
 
 SEALING_KEY_PATH = "kata/sealing"
 
 
 def sealing_privkey() -> bytes:
     """The room's private sealing key -- bound to this image, never leaves the room."""
-    return client.get_key(SEALING_KEY_PATH).decode_key()
+    return get_client().get_key(SEALING_KEY_PATH).decode_key()
 
 
 def resolve_inference_key(sealed_param: str = "", *, required: bool = True) -> str:

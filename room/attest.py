@@ -3,16 +3,14 @@
 import hashlib
 import json
 
-from room.dstack import client
+from room.dstack import get_client
 
 
 def canonical(obj) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
 
 
-def binding_payload(
-    *, report, bundle_sha256: str, provenance: dict[str, object]
-) -> dict:
+def binding_payload(*, report, bundle_sha256: str, provenance: dict[str, object]) -> dict:
     """The immutable payload covered by the TEE quote for every execution backend."""
     return {
         "report": report,
@@ -40,5 +38,5 @@ def bind_and_quote(
         )
     ).digest()
     report_data = hashlib.sha256(nonce + project_key.encode() + binding_hash).digest()
-    quote = client.get_quote(report_data)
+    quote = get_client().get_quote(report_data)
     return answer_hash, binding_hash, report_data, quote

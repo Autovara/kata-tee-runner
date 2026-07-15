@@ -5,7 +5,9 @@
 # no subnet and does not run on its own (it needs a profile).
 # The build script requires this to be an immutable upstream digest. The resulting room image is
 # then deployed by digest too, so the attested measurement identifies every executable layer.
-ARG PYTHON_BASE
+# This default is a reproducible local-build convenience; build.sh still requires
+# callers to pass an explicitly approved immutable digest.
+ARG PYTHON_BASE=python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 FROM ${PYTHON_BASE}
 # The docker CLI (static binary) so the room can pull + run the problem image inside the room.
 RUN apt-get update \
@@ -16,10 +18,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && docker --version
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml .
 COPY room/ ./room/
-# inference_gateway.py is the vendored generic miner-funded gateway (provided at build time).
-COPY inference_gateway.py .
+RUN pip install --no-cache-dir .
 EXPOSE 8080
 CMD ["python", "-m", "room.server"]
