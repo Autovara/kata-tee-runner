@@ -3,7 +3,10 @@
 # A subnet builds its runner FROM this image, adds its profile module, and sets
 # KATA_TEE_PROFILE=<module>:<Class> (see a subnet's runner Dockerfile). This base names
 # no subnet and does not run on its own (it needs a profile).
-FROM python:3.12-slim
+# The build script requires this to be an immutable upstream digest. The resulting room image is
+# then deployed by digest too, so the attested measurement identifies every executable layer.
+ARG PYTHON_BASE
+FROM ${PYTHON_BASE}
 # The docker CLI (static binary) so the room can pull + run the problem image inside the room.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \

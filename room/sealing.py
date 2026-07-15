@@ -1,8 +1,6 @@
 """Sealed-key handling (generic). The room holds a private sealing key bound to its image; a miner
 seals their inference key to the matching public key, so the owner only ever handles ciphertext."""
 
-import os
-
 from room.dstack import client
 
 SEALING_KEY_PATH = "kata/sealing"
@@ -13,15 +11,17 @@ def sealing_privkey() -> bytes:
     return client.get_key(SEALING_KEY_PATH).decode_key()
 
 
-def resolve_inference_key(sealed_param: str = "") -> str:
-    """The miner's inference key, decrypted INSIDE the room. Prefer a per-request sealed blob (so ONE
-    room serves many candidates, each with its own key), then a deploy-time SEALED_INFERENCE_KEY.
+def resolve_inference_key(sealed_param: str = "", *, required: bool = True) -> str:
+    """Decrypt the miner's per-request key inside the room.
 
-    There is deliberately NO plaintext env-var fallback: a run with no sealed key is invalid and
-    raises, so a caller can never coax the room into injecting a shared/owner key into their agent.
+    A room deliberately has no deploy-time key fallback: a supplied ciphertext is always owned by
+    the candidate being evaluated. ``required=False`` is only for a deliberately inference-free
+    agent; it returns an empty credential rather than substituting an operator key.
     """
-    sealed = (sealed_param or os.environ.get("SEALED_INFERENCE_KEY", "")).strip()
+    sealed = sealed_param.strip()
     if not sealed:
+        if not required:
+            return ""
         raise RuntimeError(
             "no sealed inference key for this run (a sealed key is required; there is no plaintext "
             "fallback)"

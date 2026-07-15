@@ -22,16 +22,21 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import traceback
 
 from flask import Flask, jsonify, request
 
 from room import auth, sealing
 from room.attest import bind_and_quote
+from room.profile import TeeJobResult
 from room.dstack import client
 from room.relay_net import docker, ghcr_login
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = int(
+    os.environ.get("KATA_ROOM_MAX_REQUEST_BYTES", str(1024 * 1024))
+)
 
 
 def load_profile():
@@ -74,13 +79,21 @@ def pubkey():
         return jsonify(error=str(exc), where=traceback.format_exc()[-1200:]), 500
 
 
-@app.get("/pull-test")
+@app.post("/pull-test")
 def pull_test():
-    """Confirm the room can log into the registry and pull a private problem image."""
+    """Private diagnostic for a registry pull; disabled unless explicitly enabled."""
+    if os.environ.get("KATA_ROOM_ENABLE_DIAGNOSTICS", "").lower() not in {"1", "true", "yes"}:
+        return jsonify(error="diagnostics are disabled"), 404
+    if not auth.is_configured():
+        return jsonify(error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"), 503
+    raw = request.get_data()
+    if not auth.verify(raw, request.headers.get(auth.SIGNATURE_HEADER, "")):
+        return jsonify(error="unauthorized"), 401
     try:
-        project_key = request.args.get("project_key", "")
+        body = json.loads(raw) if raw else {}
+        project_key = body.get("project_key", "")
         if not project_key:
-            return jsonify(error="pass ?project_key=<a real project key>"), 400
+            return jsonify(error="body must contain project_key"), 400
         ghcr_login()
         image = PROFILE.image(project_key)
         proc = docker(["pull", image])
@@ -113,25 +126,55 @@ def _run(raw: bytes):
         body = json.loads(raw) if raw else {}
     except ValueError:
         return jsonify(error="body must be JSON"), 400
+    if not isinstance(body, dict):
+        return jsonify(error="body must be a JSON object"), 400
+    window_error = auth.validate_request_window(body)
+    if window_error:
+        return jsonify(error=window_error), 400
     nonce_hex = body.get("nonce", "")
     project_key = body.get("project_key", PROFILE.fixture_project)
     sealed_key = body.get("sealed_key", "")
     bundle_b64 = body.get("bundle", "")  # base64 tar.gz of the miner's agent bundle
+    bundle_sha256 = body.get("bundle_sha256", "")
     try:
         nonce = binascii.unhexlify(nonce_hex)
     except (binascii.Error, ValueError):
         return jsonify(error="nonce must be hex"), 400
     if not (8 <= len(nonce) <= 32):
         return jsonify(error="nonce must be 8..32 bytes of hex"), 400
+    if not isinstance(bundle_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_sha256):
+        return jsonify(error="bundle_sha256 must be a lowercase SHA-256 hex digest"), 400
+    if not auth.REPLAY_GUARD.reserve(
+        nonce_hex,
+        expires_at=int(body[auth.EXPIRES_AT_FIELD]),
+    ):
+        return jsonify(error="nonce already used"), 409
 
-    report = PROFILE.run(project_key=project_key, sealed_key=sealed_key, bundle_b64=bundle_b64)
+    result = PROFILE.run(
+        project_key=project_key,
+        sealed_key=sealed_key,
+        bundle_b64=bundle_b64,
+        job_id=nonce_hex,
+        bundle_sha256=bundle_sha256,
+    )
+    if not isinstance(result, TeeJobResult):
+        raise RuntimeError("TEE profile returned an invalid result; expected TeeJobResult")
 
-    answer_hash, report_data, quote = bind_and_quote(report, nonce, project_key)
+    answer_hash, binding_hash, report_data, quote = bind_and_quote(
+        result.report,
+        nonce,
+        project_key,
+        bundle_sha256=bundle_sha256,
+        provenance=result.provenance,
+    )
     return jsonify(
         nonce=nonce_hex,
         project_key=project_key,
-        report=report,
+        report=result.report,
+        bundle_sha256=bundle_sha256,
+        provenance=result.provenance,
         answer_sha256=answer_hash.hex(),
+        binding_sha256=binding_hash.hex(),
         report_data_sha256=report_data.hex(),
         quote=quote.quote,
         event_log=quote.event_log,

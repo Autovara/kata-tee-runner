@@ -3,7 +3,7 @@
 Usage:
   python3 verify_run.py response.json --nonce <hex>
 
-It recomputes  report_data = sha256(nonce || project_key || sha256(canonical(report)))
+It recomputes  report_data = sha256(nonce || project_key || sha256(canonical(binding)))
 from the RETURNED answer, and checks it equals what the response claims the quote commits
 to. Then you confirm on https://proof.t16z.com that the quote's report_data equals the
 same value -- which proves the proof genuinely covers THIS answer (no swap, no replay).
@@ -30,12 +30,19 @@ def main() -> int:
     project_key = data["project_key"]
 
     answer_hash = hashlib.sha256(canonical(report)).digest()
+    binding = {
+        "report": report,
+        "bundle_sha256": data["bundle_sha256"],
+        "provenance": data["provenance"],
+    }
+    binding_hash = hashlib.sha256(canonical(binding)).digest()
     report_data = hashlib.sha256(
-        binascii.unhexlify(args.nonce) + project_key.encode() + answer_hash
+        binascii.unhexlify(args.nonce) + project_key.encode() + binding_hash
     ).digest()
 
     print("Recomputed from the returned answer:")
     print("  answer_sha256 :", answer_hash.hex())
+    print("  binding_sha256:", binding_hash.hex())
     print("  report_data   :", report_data.hex())
     print("Response claims the quote commits to:")
     print("  answer_sha256 :", data.get("answer_sha256"))
@@ -43,6 +50,7 @@ def main() -> int:
 
     ok = (
         answer_hash.hex() == data.get("answer_sha256")
+        and binding_hash.hex() == data.get("binding_sha256")
         and report_data.hex() == data.get("report_data_sha256")
     )
     print("\nLocal match:", "PASS" if ok else "FAIL")
