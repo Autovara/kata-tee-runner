@@ -8,6 +8,7 @@ Usage:
   pip install dcap-qvl            # in a venv
   python3 step0_check.py response.json
 """
+
 import json
 import sys
 import time
@@ -41,7 +42,16 @@ def main() -> None:
     q = parse(raw)
     report = getattr(q, "report", q)
     print("report attrs:", [x for x in dir(report) if not x.startswith("_")])
-    for name in ("report_data", "rt_mr0", "rt_mr1", "rt_mr2", "rt_mr3", "mr_td", "mrtd", "mr_config_id"):
+    for name in (
+        "report_data",
+        "rt_mr0",
+        "rt_mr1",
+        "rt_mr2",
+        "rt_mr3",
+        "mr_td",
+        "mrtd",
+        "mr_config_id",
+    ):
         val = h(report, name)
         if val is not None:
             print(f"  {name}: {val}")
@@ -52,7 +62,10 @@ def main() -> None:
 
     print("\nexpected report_data (from the runner):", expected_rd)
     rd = h(report, "report_data") or ""
-    print("MATCH:" , "YES" if rd.startswith(expected_rd) and expected_rd else "check the two above")
+    print(
+        "MATCH:",
+        "YES" if rd.startswith(expected_rd) and expected_rd else "check the two above",
+    )
 
     # signature / TCB verification -- get_collateral/verify are async, so run in a loop.
     try:

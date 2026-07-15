@@ -1,6 +1,6 @@
 """The generic sealed-room HTTP service — subnet-blind.
 
-The room handles sealing, the model-pinning relay + sealed network, attestation, and these
+The room handles sealing, the miner-funded inference gateway + sealed network, attestation, and these
 endpoints. The subnet-specific execution is a *profile* (implements ``room.profile.TeeJobProfile``)
 loaded at startup from ``KATA_TEE_PROFILE=<module>:<Class>`` — so this base names no subnet. A
 subnet image sets that env and adds its profile module (see kata-tee-runner-plan §2).
@@ -31,7 +31,7 @@ from room import auth, sealing
 from room.attest import bind_and_quote
 from room.profile import TeeJobResult
 from room.dstack import client
-from room.relay_net import docker, ghcr_login
+from room.inference_network import docker, ghcr_login
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(
@@ -82,10 +82,16 @@ def pubkey():
 @app.post("/pull-test")
 def pull_test():
     """Private diagnostic for a registry pull; disabled unless explicitly enabled."""
-    if os.environ.get("KATA_ROOM_ENABLE_DIAGNOSTICS", "").lower() not in {"1", "true", "yes"}:
+    if os.environ.get("KATA_ROOM_ENABLE_DIAGNOSTICS", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
         return jsonify(error="diagnostics are disabled"), 404
     if not auth.is_configured():
-        return jsonify(error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"), 503
+        return jsonify(
+            error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"
+        ), 503
     raw = request.get_data()
     if not auth.verify(raw, request.headers.get(auth.SIGNATURE_HEADER, "")):
         return jsonify(error="unauthorized"), 401
@@ -99,10 +105,14 @@ def pull_test():
         proc = docker(["pull", image])
         if proc.returncode != 0:
             return jsonify(ok=False, image=image, error=proc.stderr[:600]), 502
-        digest = docker(["inspect", "--format", "{{index .RepoDigests 0}}", image]).stdout.strip()
+        digest = docker(
+            ["inspect", "--format", "{{index .RepoDigests 0}}", image]
+        ).stdout.strip()
         return jsonify(ok=True, image=image, digest=digest)
     except Exception as exc:  # noqa: BLE001
-        return jsonify(ok=False, error=str(exc), where=traceback.format_exc()[-1200:]), 500
+        return jsonify(
+            ok=False, error=str(exc), where=traceback.format_exc()[-1200:]
+        ), 500
 
 
 @app.route("/run", methods=["POST"])
@@ -110,7 +120,9 @@ def run():
     # /run runs a caller-supplied agent with a decrypted key injected, so it is authenticated and
     # POST-only. Fail closed if no shared secret is configured; reject a missing/invalid signature.
     if not auth.is_configured():
-        return jsonify(error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"), 503
+        return jsonify(
+            error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"
+        ), 503
     raw = request.get_data()
     if not auth.verify(raw, request.headers.get(auth.SIGNATURE_HEADER, "")):
         return jsonify(error="unauthorized"), 401
@@ -142,8 +154,12 @@ def _run(raw: bytes):
         return jsonify(error="nonce must be hex"), 400
     if not (8 <= len(nonce) <= 32):
         return jsonify(error="nonce must be 8..32 bytes of hex"), 400
-    if not isinstance(bundle_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_sha256):
-        return jsonify(error="bundle_sha256 must be a lowercase SHA-256 hex digest"), 400
+    if not isinstance(bundle_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", bundle_sha256
+    ):
+        return jsonify(
+            error="bundle_sha256 must be a lowercase SHA-256 hex digest"
+        ), 400
     if not auth.REPLAY_GUARD.reserve(
         nonce_hex,
         expires_at=int(body[auth.EXPIRES_AT_FIELD]),
@@ -158,7 +174,9 @@ def _run(raw: bytes):
         bundle_sha256=bundle_sha256,
     )
     if not isinstance(result, TeeJobResult):
-        raise RuntimeError("TEE profile returned an invalid result; expected TeeJobResult")
+        raise RuntimeError(
+            "TEE profile returned an invalid result; expected TeeJobResult"
+        )
 
     answer_hash, binding_hash, report_data, quote = bind_and_quote(
         result.report,

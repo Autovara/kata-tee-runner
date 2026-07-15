@@ -27,8 +27,12 @@ def extract_submission_bundle(bundle_b64: str, destination: Path) -> None:
     """Decode and extract a Kata-sized bundle without allowing a tar bomb."""
     if not bundle_b64:
         raise RuntimeError("TEE run is missing its candidate bundle")
-    max_compressed = _positive_env("KATA_ROOM_MAX_COMPRESSED_BUNDLE_BYTES", DEFAULT_MAX_COMPRESSED_BYTES)
-    max_extracted = _positive_env("KATA_ROOM_MAX_EXTRACTED_BUNDLE_BYTES", DEFAULT_MAX_EXTRACTED_BYTES)
+    max_compressed = _positive_env(
+        "KATA_ROOM_MAX_COMPRESSED_BUNDLE_BYTES", DEFAULT_MAX_COMPRESSED_BYTES
+    )
+    max_extracted = _positive_env(
+        "KATA_ROOM_MAX_EXTRACTED_BUNDLE_BYTES", DEFAULT_MAX_EXTRACTED_BYTES
+    )
     max_files = _positive_env("KATA_ROOM_MAX_BUNDLE_FILES", DEFAULT_MAX_FILES)
     # Base64 has at most 4/3 expansion.  Reject before allocating an unbounded string payload.
     if len(bundle_b64) > ((max_compressed + 2) // 3) * 4:

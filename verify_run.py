@@ -8,6 +8,7 @@ from the RETURNED answer, and checks it equals what the response claims the quot
 to. Then you confirm on https://proof.t16z.com that the quote's report_data equals the
 same value -- which proves the proof genuinely covers THIS answer (no swap, no replay).
 """
+
 import argparse
 import binascii
 import hashlib
@@ -54,7 +55,9 @@ def main() -> int:
         and report_data.hex() == data.get("report_data_sha256")
     )
     print("\nLocal match:", "PASS" if ok else "FAIL")
-    print("\nFinal check: on https://proof.t16z.com, confirm the quote's report_data ==")
+    print(
+        "\nFinal check: on https://proof.t16z.com, confirm the quote's report_data =="
+    )
     print("  ", report_data.hex())
     print("If it matches, the proof genuinely covers THIS answer.")
     return 0 if ok else 1

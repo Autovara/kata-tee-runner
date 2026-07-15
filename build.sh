@@ -5,7 +5,7 @@
 # Usage:
 #   PYTHON_BASE=python:3.12-slim@sha256:<digest> ./build.sh v1
 #   PYTHON_BASE=python:3.12-slim@sha256:<digest> ./build.sh v1 --push
-#   IMAGE=myrepo/tee-runner:v1 RELAY_SRC=/path/to/relay.py PYTHON_BASE=... ./build.sh v1
+#   IMAGE=myrepo/tee-runner:v1 GATEWAY_SRC=/path/to/inference_gateway.py PYTHON_BASE=... ./build.sh v1
 set -euo pipefail
 
 TAG="${1:?usage: ./build.sh <tag> [--push]}"
@@ -16,13 +16,12 @@ case "$PYTHON_BASE" in
   *) echo "ERROR: PYTHON_BASE must be an immutable image digest (...@sha256:...)" >&2; exit 1 ;;
 esac
 
-# relay.py is the vendored model-pinning relay (gitignored). Its de-SN60'd source of truth is a
-# §6 follow-up in ../KATA-TEE-RUNNER-PLAN.md; until then it's vendored from the SN60 relay, which a
-# subnet image can override with its own. Override RELAY_SRC to vendor a different relay.
-RELAY_SRC="${RELAY_SRC:-../kata-sn60/kata_sn60/validator_system/model_relay.py}"
-[ -f "$RELAY_SRC" ] || { echo "ERROR: relay source not found at $RELAY_SRC (set RELAY_SRC=)" >&2; exit 1; }
-cp "$RELAY_SRC" relay.py
-echo "vendored relay.py <- $RELAY_SRC"
+# inference_gateway.py is vendored from the shared SN60 implementation until its source moves into
+# this generic repository. A subnet may override GATEWAY_SRC with its own gateway implementation.
+GATEWAY_SRC="${GATEWAY_SRC:-../kata-sn60/kata_sn60/validator_system/inference_gateway.py}"
+[ -f "$GATEWAY_SRC" ] || { echo "ERROR: gateway source not found at $GATEWAY_SRC (set GATEWAY_SRC=)" >&2; exit 1; }
+cp "$GATEWAY_SRC" inference_gateway.py
+echo "vendored inference_gateway.py <- $GATEWAY_SRC"
 
 docker build --build-arg PYTHON_BASE="$PYTHON_BASE" -f Dockerfile.base -t "$IMAGE" .
 echo "built $IMAGE"

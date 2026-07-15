@@ -12,6 +12,7 @@ What it does, all locally (your key never leaves your machine):
 
 Requirements:  pip install eciespy dcap-qvl
 """
+
 import argparse
 import asyncio
 import inspect
@@ -43,8 +44,14 @@ def verify_room(quote_hex: str, expected_measurement: str | None) -> tuple[str, 
         return v
 
     status = getattr(asyncio.run(_v()), "status", "")
-    if status not in ("UpToDate", "SWHardeningNeeded", "ConfigurationAndSWHardeningNeeded"):
-        raise SystemExit(f"ERROR: room attestation is not valid (status={status}). Not sealing.")
+    if status not in (
+        "UpToDate",
+        "SWHardeningNeeded",
+        "ConfigurationAndSWHardeningNeeded",
+    ):
+        raise SystemExit(
+            f"ERROR: room attestation is not valid (status={status}). Not sealing."
+        )
     if expected_measurement and measurement != expected_measurement:
         raise SystemExit(
             f"ERROR: room measurement {measurement} != expected {expected_measurement}.\n"
@@ -55,11 +62,29 @@ def verify_room(quote_hex: str, expected_measurement: str | None) -> tuple[str, 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Seal your inference key to a Kata room.")
-    ap.add_argument("--room", required=True, help="the room URL, e.g. https://<id>-8080.dstack-...phala.network")
-    ap.add_argument("--key", required=True, help="your inference API key (sk-...); stays on your machine")
-    ap.add_argument("--measurement", default="", help="the approved room compose-hash (recommended)")
-    ap.add_argument("--out", default="sealed_inference_key", help="output file to include in your PR")
-    ap.add_argument("--no-verify", action="store_true", help="skip attestation check (NOT recommended)")
+    ap.add_argument(
+        "--room",
+        required=True,
+        help="the room URL, e.g. https://<id>-8080.dstack-...phala.network",
+    )
+    ap.add_argument(
+        "--key",
+        required=True,
+        help="your inference API key (sk-...); stays on your machine",
+    )
+    ap.add_argument(
+        "--measurement", default="", help="the approved room compose-hash (recommended)"
+    )
+    ap.add_argument(
+        "--out",
+        default="sealed_inference_key",
+        help="output file to include in your PR",
+    )
+    ap.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="skip attestation check (NOT recommended)",
+    )
     args = ap.parse_args()
 
     info = fetch_pubkey(args.room)
@@ -76,7 +101,9 @@ def main() -> None:
     sealed = encrypt(pubkey, args.key.encode()).hex()
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(sealed)
-    print(f"sealed key -> {args.out} ({len(sealed)} hex chars). Add this file to your PR.")
+    print(
+        f"sealed key -> {args.out} ({len(sealed)} hex chars). Add this file to your PR."
+    )
 
 
 if __name__ == "__main__":

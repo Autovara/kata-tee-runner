@@ -1,5 +1,5 @@
 """The ONE seam a subnet implements to run inside the sealed room. The room handles sealing, the
-relay + sealed network, attestation, and the HTTP endpoints; a subnet profile only says how to
+inference gateway + sealed network, attestation, and the HTTP endpoints; a subnet profile only says how to
 fetch its problem and run the miner's agent against it to produce a report.
 
 This is the generic contract; a subnet's implementation lives in the subnet's own package and is
@@ -31,6 +31,6 @@ class TeeJobProfile(Protocol):
         bundle_sha256: str,
     ) -> TeeJobResult:
         """Run the miner's agent for ``project_key`` inside the room and return its report (a
-        JSON-able dict) and immutable execution provenance. Talks only to the in-room relay for
+        JSON-able dict) and immutable execution provenance. Talks only to the in-room gateway for
         inference. ``fixture_project`` selects a lightweight stub."""
         ...

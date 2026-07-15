@@ -19,8 +19,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY room/ ./room/
-# relay.py is the vendored generic model-pinning relay (gitignored; provided at build time —
-# source-of-truth relocation is §6 of KATA-TEE-RUNNER-PLAN.md).
-COPY relay.py .
+# inference_gateway.py is the vendored generic miner-funded gateway (provided at build time).
+COPY inference_gateway.py .
 EXPOSE 8080
 CMD ["python", "-m", "room.server"]

@@ -7,7 +7,9 @@ import sys
 import types
 
 os.environ.setdefault("KATA_TEE_PROFILE", "fake_profile:FakeProfile")
-os.environ.setdefault("KATA_ROOM_AUTH_SECRET", "test-secret")  # /run is authenticated (see room.auth)
+os.environ.setdefault(
+    "KATA_ROOM_AUTH_SECRET", "test-secret"
+)  # /run is authenticated (see room.auth)
 
 _fake = types.ModuleType("dstack_sdk")
 

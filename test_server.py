@@ -46,12 +46,23 @@ def test_bind_and_quote_binds_answer_project_and_nonce():
     nonce = b"\x02" * 16
     provenance = {"profile": "fake", "project_image": "image@sha256:test"}
     answer_hash, binding_hash, report_data, quote = bind_and_quote(
-        report, nonce, "proj-a", bundle_sha256="ab" * 32, provenance=provenance,
+        report,
+        nonce,
+        "proj-a",
+        bundle_sha256="ab" * 32,
+        provenance=provenance,
     )
     assert answer_hash == hashlib.sha256(canonical(report)).digest()
-    assert binding_hash == hashlib.sha256(
-        canonical(binding_payload(report=report, bundle_sha256="ab" * 32, provenance=provenance))
-    ).digest()
+    assert (
+        binding_hash
+        == hashlib.sha256(
+            canonical(
+                binding_payload(
+                    report=report, bundle_sha256="ab" * 32, provenance=provenance
+                )
+            )
+        ).digest()
+    )
     assert report_data == hashlib.sha256(nonce + b"proj-a" + binding_hash).digest()
     assert quote.quote
 
@@ -62,11 +73,18 @@ def test_run_uses_the_loaded_profile_and_binds():
     data = resp.get_json()
     assert resp.status_code == 200
     assert data["report"] == {"findings": ["proj-x"]}
-    binding_hash = hashlib.sha256(canonical(binding_payload(
-        report={"findings": ["proj-x"]}, bundle_sha256="ab" * 32,
-        provenance=data["provenance"],
-    ))).digest()
-    report_data = hashlib.sha256(bytes.fromhex(nonce) + b"proj-x" + binding_hash).digest()
+    binding_hash = hashlib.sha256(
+        canonical(
+            binding_payload(
+                report={"findings": ["proj-x"]},
+                bundle_sha256="ab" * 32,
+                provenance=data["provenance"],
+            )
+        )
+    ).digest()
+    report_data = hashlib.sha256(
+        bytes.fromhex(nonce) + b"proj-x" + binding_hash
+    ).digest()
     assert data["report_data_sha256"] == report_data.hex()
     assert data["quote"] == "fake-quote:" + report_data.hex()
 
@@ -83,10 +101,17 @@ def test_run_rejects_replay():
 
 def test_run_rejects_expired_request():
     now = int(time.time())
-    assert _post_run({
-        "nonce": "ef" * 16, "project_key": "proj-x", "issued_at": now - 120,
-        "expires_at": now - 60,
-    }).status_code == 400
+    assert (
+        _post_run(
+            {
+                "nonce": "ef" * 16,
+                "project_key": "proj-x",
+                "issued_at": now - 120,
+                "expires_at": now - 60,
+            }
+        ).status_code
+        == 400
+    )
 
 
 def test_pull_test_is_disabled_by_default():
@@ -102,11 +127,21 @@ def test_inference_free_profile_never_receives_a_fallback_key():
 def test_run_rejects_unsigned_request():
     # No signature header -> 401. This is the fix for the key-exfil vuln: an attacker can't invoke
     # /run (so can't have a victim's sealed key decrypted into their agent).
-    assert _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature=None).status_code == 401
+    assert (
+        _post_run(
+            {"nonce": "cc" * 16, "project_key": "proj-x"}, signature=None
+        ).status_code
+        == 401
+    )
 
 
 def test_run_rejects_bad_signature():
-    assert _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature="deadbeef").status_code == 401
+    assert (
+        _post_run(
+            {"nonce": "cc" * 16, "project_key": "proj-x"}, signature="deadbeef"
+        ).status_code
+        == 401
+    )
 
 
 def test_run_rejects_tampered_body_after_signing():
@@ -115,7 +150,8 @@ def test_run_rejects_tampered_body_after_signing():
     sig = auth.sign(raw)
     tampered = raw.replace(b"proj-x", b"proj-EVIL")
     resp = app.test_client().post(
-        "/run", data=tampered,
+        "/run",
+        data=tampered,
         headers={"Content-Type": "application/json", auth.SIGNATURE_HEADER: sig},
     )
     assert resp.status_code == 401
