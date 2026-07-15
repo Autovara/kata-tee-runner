@@ -17,23 +17,28 @@ Deployment secrets arrive as sealed environment variables (delivered to the
 attested room; never hardcoded):
   GHCR_USER, GHCR_TOKEN  -- registry login to pull the private problem image
 
-Each miner's provider key is instead supplied as ``sealed_key`` in its signed
-``/run`` request. The room decrypts it only for that job and passes it to the
-subnet profile; it is never a runner-wide environment variable.
+Each miner's provider credential is instead supplied as ``sealed_key`` in its
+signed ``/run`` request. The room decrypts it only for that job, verifies that
+it is bound to the submitted agent bundle, and passes it to the subnet profile;
+it is never a runner-wide environment variable.
 """
 
 import binascii
 import hashlib
+import hmac
 import importlib
 import json
 import os
 import re
+import tempfile
 import traceback
+from pathlib import Path
 
 from flask import Flask, jsonify, request
 
 from room import auth, sealing
 from room.attest import bind_and_quote
+from room.bundle import credential_bundle_binding, extract_submission_bundle
 from room.dstack import get_client
 from room.inference_network import docker, ghcr_login
 from room.profile import TeeJobResult
@@ -159,13 +164,36 @@ def _run(raw: bytes):
     ):
         return jsonify(error="nonce already used"), 409
 
-    result = PROFILE.run(
-        project_key=project_key,
-        sealed_key=sealed_key,
-        bundle_b64=bundle_b64,
-        job_id=nonce_hex,
-        bundle_sha256=bundle_sha256,
-    )
+    try:
+        credential = sealing.resolve_miner_credential(sealed_key, required=False)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 400
+    if credential is not None and not bundle_b64:
+        return jsonify(error="a sealed miner credential requires a candidate bundle"), 400
+
+    with tempfile.TemporaryDirectory() as directory:
+        bundle_root: Path | None = None
+        if bundle_b64:
+            bundle_root = Path(directory) / "bundle"
+            try:
+                extract_submission_bundle(bundle_b64, bundle_root)
+                actual_binding = credential_bundle_binding(bundle_root)
+            except RuntimeError as exc:
+                return jsonify(error=str(exc)), 400
+            if credential is not None and not hmac.compare_digest(
+                credential.bundle_binding, actual_binding
+            ):
+                return (
+                    jsonify(error="sealed miner credential is not bound to this candidate bundle"),
+                    400,
+                )
+        result = PROFILE.run(
+            project_key=project_key,
+            credential=credential,
+            bundle_root=str(bundle_root) if bundle_root is not None else None,
+            job_id=nonce_hex,
+            bundle_sha256=bundle_sha256,
+        )
     if not isinstance(result, TeeJobResult):
         raise RuntimeError("TEE profile returned an invalid result; expected TeeJobResult")
 

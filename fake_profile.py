@@ -1,7 +1,7 @@
 """A trivial in-repo TeeJobProfile for the plumbing test — proves the room runs any subnet's
 profile with no subnet-specific code in the base."""
 
-from room.profile import TeeJobResult
+from room.profile import MinerInferenceCredential, TeeJobResult
 
 
 class FakeProfile:
@@ -14,13 +14,17 @@ class FakeProfile:
         self,
         *,
         project_key: str,
-        sealed_key: str = "",
-        bundle_b64: str = "",
+        credential: MinerInferenceCredential | None = None,
+        bundle_root: str | None = None,
         job_id: str,
         bundle_sha256: str,
     ) -> TeeJobResult:
         return TeeJobResult(
-            report={"findings": [project_key]},
+            report={
+                "findings": [project_key],
+                "credential_provider": credential.provider if credential else None,
+                "bundle_received": bundle_root is not None,
+            },
             provenance={
                 "profile": "fake",
                 "project_image": f"registry.example/{project_key}@sha256:fake",

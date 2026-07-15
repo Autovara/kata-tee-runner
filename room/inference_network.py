@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+from room.inference_gateway import make_job_route_token
+
 GHCR = "ghcr.io"
 INF_NET = "kata-inf-net"
 INFERENCE_GATEWAY_ALIAS = "kata-inference-gateway"
@@ -78,6 +80,11 @@ def ensure_inference_network_once():
     _inference_network_ready = True
 
 
-def inference_gateway_url() -> str:
-    """Return the only provider-facing URL available inside an agent container."""
-    return f"http://{INFERENCE_GATEWAY_ALIAS}:{INFERENCE_GATEWAY_PORT}"
+def inference_gateway_url(job_id: str, provider: str) -> str:
+    """Return the signed, provider-bound gateway URL for one agent job.
+
+    The route token contains no API key. It prevents an untrusted agent from
+    switching the encrypted credential to another allowlisted provider.
+    """
+    route = make_job_route_token(job_id, provider)
+    return f"http://{INFERENCE_GATEWAY_ALIAS}:{INFERENCE_GATEWAY_PORT}/j/{route}"

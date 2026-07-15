@@ -8,12 +8,12 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from room import inference_network
+from room import auth, inference_network
 from room.inference_gateway import (
     GatewayConfigurationError,
     build_server,
-    resolve_direct_route,
-    resolve_proxy_upstream,
+    make_job_route_token,
+    resolve_provider_routes,
     resolve_timeout,
 )
 
@@ -48,16 +48,34 @@ class RecordingProvider(BaseHTTPRequestHandler):
         return
 
 
+def _routes(provider_url: str) -> str:
+    return json.dumps(
+        {
+            "openrouter": {
+                "upstream": f"{provider_url}/openrouter/chat/completions",
+            },
+            "chutes": {
+                "upstream": f"{provider_url}/chutes/chat/completions",
+                "auth_header": "X-API-Key",
+                "auth_value_template": "Token {api_key}",
+                "headers": {"X-Route-Owner": "miner"},
+            },
+            "akashml": {
+                "upstream": f"{provider_url}/akashml/chat/completions",
+            },
+        }
+    )
+
+
 @pytest.fixture
 def gateway_and_provider(monkeypatch):
+    monkeypatch.setenv(auth.AUTH_SECRET_ENV, "room-test-secret")
     provider = ThreadingHTTPServer(("127.0.0.1", 0), RecordingProvider)
     provider.records = []  # type: ignore[attr-defined]
     provider.daemon_threads = True
     threading.Thread(target=provider.serve_forever, daemon=True).start()
-    monkeypatch.setenv(
-        "KATA_INFERENCE_GATEWAY_UPSTREAM",
-        f"http://127.0.0.1:{provider.server_address[1]}",
-    )
+    provider_url = f"http://127.0.0.1:{provider.server_address[1]}"
+    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON", _routes(provider_url))
     gateway = build_server("127.0.0.1", 0)
     threading.Thread(target=gateway.serve_forever, daemon=True).start()
     try:
@@ -77,11 +95,21 @@ def post(url: str, body: bytes, headers: dict[str, str] | None = None):
         )
 
 
-def test_proxy_route_is_optional_and_has_no_provider_default(monkeypatch) -> None:
-    monkeypatch.delenv("KATA_INFERENCE_GATEWAY_UPSTREAM", raising=False)
-    assert resolve_proxy_upstream() is None
-    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_UPSTREAM", "http://provider:8000/")
-    assert resolve_proxy_upstream() == "http://provider:8000"
+def inference_url(base: str, provider: str, job_id: str = "a" * 32) -> str:
+    return f"{base}/j/{make_job_route_token(job_id, provider)}/inference"
+
+
+def test_provider_routes_are_explicit_and_operator_configured(monkeypatch) -> None:
+    monkeypatch.delenv("KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON", raising=False)
+    with pytest.raises(GatewayConfigurationError, match="must configure at least one provider"):
+        resolve_provider_routes()
+
+    monkeypatch.setenv(
+        "KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON",
+        json.dumps({"bad provider": {"upstream": "https://provider.example/v1/chat/completions"}}),
+    )
+    with pytest.raises(GatewayConfigurationError, match="provider route names"):
+        resolve_provider_routes()
 
 
 def test_timeout_is_transport_configuration_not_inference_policy(monkeypatch) -> None:
@@ -91,15 +119,7 @@ def test_timeout_is_transport_configuration_not_inference_policy(monkeypatch) ->
     assert resolve_timeout() == 900.0
 
 
-def test_direct_route_requires_explicit_prefixes_and_endpoint(monkeypatch) -> None:
-    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_DIRECT_KEY_PREFIXES", "miner-")
-    monkeypatch.delenv("KATA_INFERENCE_GATEWAY_DIRECT_UPSTREAM", raising=False)
-
-    with pytest.raises(GatewayConfigurationError, match="must be configured together"):
-        resolve_direct_route("miner-key")
-
-
-def test_gateway_forwards_miner_request_and_key_unchanged(gateway_and_provider) -> None:
+def test_gateway_routes_each_signed_job_to_its_sealed_provider(gateway_and_provider) -> None:
     base, provider = gateway_and_provider
     body = json.dumps(
         {
@@ -112,127 +132,107 @@ def test_gateway_forwards_miner_request_and_key_unchanged(gateway_and_provider) 
     ).encode()
 
     status, _, response_headers = post(
-        base + "/inference",
+        inference_url(base, "openrouter"),
         body,
-        {"Content-Type": "application/json", "x-inference-api-key": "miner-key"},
+        {"Content-Type": "application/json", "x-inference-api-key": "openrouter-key"},
     )
-
     assert status == 200
     assert response_headers["x-provider"] == "yes"
-    assert len(provider.records) == 1
-    record = provider.records[0]
-    assert record["path"] == "/inference"
-    assert record["body"] == body
-    assert record["headers"]["x-inference-api-key"] == "miner-key"
 
-
-def test_job_alias_is_private_to_the_room_and_query_is_preserved(
-    gateway_and_provider,
-) -> None:
-    base, provider = gateway_and_provider
-    post(
-        base + "/j/private-job-1/inference?trace=1",
-        b"{}",
-        {"x-inference-api-key": "miner-key"},
+    status, _, _ = post(
+        inference_url(base, "chutes", "b" * 32),
+        body,
+        {
+            "Authorization": "Bearer attacker-supplied-value",
+            "Content-Type": "application/json",
+            "x-inference-api-key": "chutes-key",
+        },
     )
+    assert status == 200
 
-    assert provider.records[0]["path"] == "/inference?trace=1"
+    assert [record["path"] for record in provider.records] == [
+        "/openrouter/chat/completions",
+        "/chutes/chat/completions",
+    ]
+    openrouter, chutes = provider.records
+    assert openrouter["body"] == body
+    assert openrouter["headers"]["authorization"] == "Bearer openrouter-key"
+    assert "x-inference-api-key" not in openrouter["headers"]
+    assert chutes["body"] == body
+    assert chutes["headers"]["x-api-key"] == "Token chutes-key"
+    assert chutes["headers"]["x-route-owner"] == "miner"
+    assert "authorization" not in chutes["headers"]
 
 
-def test_gateway_rejects_a_missing_miner_key_before_any_provider_call(
-    gateway_and_provider,
-) -> None:
+def test_gateway_does_not_allow_an_agent_to_change_its_provider(gateway_and_provider) -> None:
     base, provider = gateway_and_provider
+    route = make_job_route_token("c" * 32, "openrouter")
+    tampered = route.replace("~openrouter~", "~akashml~")
 
     with pytest.raises(HTTPError) as error:
-        post(base + "/inference", b"{}")
+        post(
+            f"{base}/j/{tampered}/inference",
+            b"{}",
+            {"x-inference-api-key": "miner-key"},
+        )
 
+    assert error.value.code == 403
+    assert provider.records == []
+
+
+def test_gateway_rejects_a_missing_miner_key_before_provider_call(gateway_and_provider) -> None:
+    base, provider = gateway_and_provider
+    with pytest.raises(HTTPError) as error:
+        post(inference_url(base, "akashml"), b"{}")
     assert error.value.code == 401
     assert provider.records == []
 
 
-def test_gateway_uses_a_direct_route_without_rewriting_the_request(
-    gateway_and_provider, monkeypatch
-) -> None:
-    base, proxy_provider = gateway_and_provider
-    direct_provider = ThreadingHTTPServer(("127.0.0.1", 0), RecordingProvider)
-    direct_provider.records = []  # type: ignore[attr-defined]
-    direct_provider.daemon_threads = True
-    threading.Thread(target=direct_provider.serve_forever, daemon=True).start()
-    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_DIRECT_KEY_PREFIXES", "direct-")
-    monkeypatch.setenv(
-        "KATA_INFERENCE_GATEWAY_DIRECT_UPSTREAM",
-        f"http://127.0.0.1:{direct_provider.server_address[1]}/v1/chat/completions",
-    )
-    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_DIRECT_AUTH_HEADER", "X-API-Key")
-    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_DIRECT_AUTH_VALUE_TEMPLATE", "Token {api_key}")
-    body = json.dumps({"model": "miner/model", "messages": [], "max_tokens": 99999}).encode()
-    try:
-        post(base + "/inference", body, {"x-inference-api-key": "direct-secret"})
-    finally:
-        direct_provider.shutdown()
-
-    assert proxy_provider.records == []
-    record = direct_provider.records[0]
-    assert record["path"] == "/v1/chat/completions"
-    assert record["headers"]["x-api-key"] == "Token direct-secret"
-    assert "x-inference-api-key" not in record["headers"]
-    assert record["body"] == body
-
-
-def test_gateway_rejects_requests_when_no_matching_provider_route_exists(
-    monkeypatch,
-) -> None:
-    monkeypatch.delenv("KATA_INFERENCE_GATEWAY_UPSTREAM", raising=False)
-    monkeypatch.delenv("KATA_INFERENCE_GATEWAY_DIRECT_KEY_PREFIXES", raising=False)
-    monkeypatch.delenv("KATA_INFERENCE_GATEWAY_DIRECT_UPSTREAM", raising=False)
-    gateway = build_server("127.0.0.1", 0)
-    threading.Thread(target=gateway.serve_forever, daemon=True).start()
-    try:
-        with pytest.raises(HTTPError) as error:
-            post(
-                f"http://127.0.0.1:{gateway.server_address[1]}/inference",
-                b"{}",
-                {"x-inference-api-key": "miner-key"},
-            )
-        assert error.value.code == 502
-    finally:
-        gateway.shutdown()
-
-
-def test_gateway_blocks_non_inference_routes(gateway_and_provider) -> None:
+def test_gateway_rejects_a_provider_not_enabled_by_the_operator(gateway_and_provider) -> None:
     base, provider = gateway_and_provider
-
     with pytest.raises(HTTPError) as error:
-        post(base + "/metrics/reset", b"{}")
-
-    assert error.value.code == 404
+        post(
+            inference_url(base, "other-provider"),
+            b"{}",
+            {"x-inference-api-key": "miner-key"},
+        )
+    assert error.value.code == 502
     assert provider.records == []
 
 
-def test_health_is_local_and_does_not_contact_the_provider(
-    gateway_and_provider,
-) -> None:
+def test_gateway_blocks_unsigned_or_non_inference_routes(gateway_and_provider) -> None:
     base, provider = gateway_and_provider
+    for path in ("/inference", "/j/not-a-token/inference", "/metrics/reset"):
+        with pytest.raises(HTTPError) as error:
+            post(base + path, b"{}", {"x-inference-api-key": "miner-key"})
+        assert error.value.code == 403
+    assert provider.records == []
 
+
+def test_health_is_local_and_does_not_contact_the_provider(gateway_and_provider) -> None:
+    base, provider = gateway_and_provider
     with urlopen(base + "/healthz", timeout=10) as response:
         payload = json.loads(response.read())
-
     assert payload == {"status": "ok", "service": "miner-inference-gateway"}
     assert provider.records == []
 
 
 def test_gateway_passes_provider_http_errors_through(gateway_and_provider) -> None:
     base, _provider = gateway_and_provider
-
     with pytest.raises(HTTPError) as error:
         post(
-            base + "/inference",
+            inference_url(base, "openrouter"),
             b"{}",
             {"X-Upstream-Boom": "yes", "x-inference-api-key": "miner-key"},
         )
-
     assert error.value.code == 502
+
+
+def test_inference_network_creates_a_signed_provider_bound_url(monkeypatch) -> None:
+    monkeypatch.setenv(auth.AUTH_SECRET_ENV, "room-test-secret")
+    url = inference_network.inference_gateway_url("d" * 32, "akashml")
+    assert url.startswith("http://kata-inference-gateway:8000/j/")
+    assert "~akashml~" in url
 
 
 def test_runner_starts_the_built_in_gateway_module(monkeypatch) -> None:

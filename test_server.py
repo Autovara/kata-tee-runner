@@ -5,13 +5,16 @@ and covers the /run request authentication (room.auth)."""
 
 import hashlib
 import json
+import tarfile
 import time
-
-import pytest
+from base64 import b64encode
+from io import BytesIO
+from pathlib import Path
+from tarfile import TarFile
 
 from room import auth
 from room.attest import bind_and_quote, binding_payload, canonical
-from room.sealing import resolve_inference_key
+from room.profile import MinerInferenceCredential
 from room.server import PROFILE, app
 
 
@@ -31,6 +34,17 @@ def _post_run(body: dict, *, signature: str | None = "__valid__"):
     elif signature is not None:
         headers[auth.SIGNATURE_HEADER] = signature
     return app.test_client().post("/run", data=raw, headers=headers)
+
+
+def _bundle_b64(files: dict[str, str]) -> str:
+    buffer = BytesIO()
+    with TarFile.open(fileobj=buffer, mode="w:gz") as archive:
+        for relative, content in files.items():
+            data = content.encode()
+            info = tarfile.TarInfo(relative)
+            info.size = len(data)
+            archive.addfile(info, BytesIO(data))
+    return b64encode(buffer.getvalue()).decode()
 
 
 def test_profile_is_loaded_generically_from_env():
@@ -70,11 +84,19 @@ def test_run_uses_the_loaded_profile_and_binds():
     resp = _post_run({"nonce": nonce, "project_key": "proj-x"})
     data = resp.get_json()
     assert resp.status_code == 200
-    assert data["report"] == {"findings": ["proj-x"]}
+    assert data["report"] == {
+        "findings": ["proj-x"],
+        "credential_provider": None,
+        "bundle_received": False,
+    }
     binding_hash = hashlib.sha256(
         canonical(
             binding_payload(
-                report={"findings": ["proj-x"]},
+                report={
+                    "findings": ["proj-x"],
+                    "credential_provider": None,
+                    "bundle_received": False,
+                },
                 bundle_sha256="ab" * 32,
                 provenance=data["provenance"],
             )
@@ -114,10 +136,62 @@ def test_pull_test_is_disabled_by_default():
     assert app.test_client().post("/pull-test").status_code == 404
 
 
-def test_inference_free_profile_never_receives_a_fallback_key():
-    assert resolve_inference_key(required=False) == ""
-    with pytest.raises(RuntimeError, match="no sealed inference key"):
-        resolve_inference_key()
+def test_run_binds_a_decrypted_credential_to_the_exact_agent_bundle(monkeypatch, tmp_path: Path):
+    from room import server
+    from room.bundle import credential_bundle_binding
+
+    bundle_root = tmp_path / "bundle"
+    bundle_root.mkdir()
+    (bundle_root / "agent.py").write_text("def agent_main(): pass\n", encoding="utf-8")
+    binding = credential_bundle_binding(bundle_root)
+    credential = MinerInferenceCredential(
+        provider="openrouter",
+        api_key="private-miner-key",
+        bundle_binding=binding,
+    )
+    monkeypatch.setattr(server.sealing, "resolve_miner_credential", lambda *_a, **_k: credential)
+    bundle = _bundle_b64({"agent.py": "def agent_main(): pass\n"})
+
+    response = _post_run(
+        {
+            "nonce": "aa" * 16,
+            "project_key": "proj-x",
+            "sealed_key": "ciphertext-visible-to-validator-only",
+            "bundle": bundle,
+        }
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["report"]["credential_provider"] == "openrouter"
+    assert "private-miner-key" not in response.get_data(as_text=True)
+
+
+def test_run_rejects_credential_replayed_with_a_substituted_agent(monkeypatch, tmp_path: Path):
+    from room import server
+    from room.bundle import credential_bundle_binding
+
+    original = tmp_path / "original"
+    original.mkdir()
+    (original / "agent.py").write_text("safe agent\n", encoding="utf-8")
+    credential = MinerInferenceCredential(
+        provider="chutes",
+        api_key="private-miner-key",
+        bundle_binding=credential_bundle_binding(original),
+    )
+    monkeypatch.setattr(server.sealing, "resolve_miner_credential", lambda *_a, **_k: credential)
+    substituted_bundle = _bundle_b64({"agent.py": "malicious exfiltration agent\n"})
+
+    response = _post_run(
+        {
+            "nonce": "bb" * 16,
+            "project_key": "proj-x",
+            "sealed_key": "public-ciphertext",
+            "bundle": substituted_bundle,
+        }
+    )
+
+    assert response.status_code == 400
+    assert "not bound to this candidate bundle" in response.get_json()["error"]
 
 
 def test_run_rejects_unsigned_request():

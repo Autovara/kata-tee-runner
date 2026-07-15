@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import io
 import os
 import tarfile
@@ -12,6 +13,8 @@ from pathlib import Path
 DEFAULT_MAX_COMPRESSED_BYTES = 512 * 1024
 DEFAULT_MAX_EXTRACTED_BYTES = 256 * 1024
 DEFAULT_MAX_FILES = 16
+SEALED_CREDENTIAL_FILENAME = "sealed_inference_key"
+_BUNDLE_BINDING_DOMAIN = b"kata-miner-credential-bundle-v1\0"
 
 
 def _positive_env(name: str, default: int) -> int:
@@ -55,3 +58,31 @@ def extract_submission_bundle(bundle_b64: str, destination: Path) -> None:
             archive.extractall(destination, filter="data")
     except (tarfile.TarError, OSError) as exc:
         raise RuntimeError("candidate bundle is not a safe gzip tar archive") from exc
+
+
+def credential_bundle_binding(bundle_root: Path) -> str:
+    """Return the stable hash to which a miner seals a provider credential.
+
+    The public ciphertext file is intentionally excluded so the miner can hash
+    the bundle before creating it.  Every executable bundle file is included,
+    making a ciphertext unusable with a substituted agent or helper file.
+    """
+
+    if not bundle_root.is_dir():
+        raise RuntimeError("credential binding requires an extracted bundle directory")
+    digest = hashlib.sha256(_BUNDLE_BINDING_DOMAIN)
+    for path in sorted(bundle_root.rglob("*")):
+        if path.is_dir():
+            continue
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError("credential binding accepts regular bundle files only")
+        relative = path.relative_to(bundle_root).as_posix()
+        if relative == SEALED_CREDENTIAL_FILENAME:
+            continue
+        encoded_path = relative.encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(encoded_path).to_bytes(4, "big"))
+        digest.update(encoded_path)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()

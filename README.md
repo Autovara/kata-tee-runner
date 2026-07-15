@@ -1,18 +1,19 @@
 # kata-tee-runner — the generic sealed-room TEE runner
 
-A **subnet-blind** Phala confidential-VM "safe room": it seals a miner's inference key, runs the
-miner's agent against a pulled problem behind an in-room **miner-funded inference gateway** (so the
-agent has no direct internet while its own provider key pays for unchanged inference requests), and
-returns the answer plus a
+A **subnet-blind** Phala confidential-VM "safe room": it seals a miner's provider credential,
+binds it to that miner's exact submission bundle, then runs the agent behind an in-room
+**miner-funded inference gateway**. The agent has no direct internet while its own provider key
+pays for unchanged inference requests. The room returns the answer plus a
 hardware **attestation** whose report-data binds the answer to the project + round nonce. The
-maintainer never sees the key and never pays for inference.
+maintainer and validator handle only ciphertext; neither receives the plaintext provider key or
+provider descriptor, and neither pays for inference.
 
 Any subnet reuses this room by shipping a small **profile** — this base names no subnet.
 
 ```
 room/                 the generic core
   server.py           /health /pubkey /run; signed diagnostic /pull-test only when enabled
-  sealing.py          sealed-key handling
+  sealing.py          encrypted miner-provider credential handling
   inference_network.py miner-funded gateway + sealed internal network + registry login
   attest.py           canonical() + bind_and_quote() (binds report + bundle hash + provenance)
   dstack.py           the confidential-VM client
@@ -24,7 +25,7 @@ pyproject.toml        runtime and development dependencies
 
 ## The profile seam
 A subnet implements `room.profile.TeeJobProfile` (`fixture_project`, `image(project_key)`,
-`run(*, project_key, sealed_key, bundle_b64, job_id, bundle_sha256) -> TeeJobResult`) and points
+`run(*, project_key, credential, bundle_root, job_id, bundle_sha256) -> TeeJobResult`) and points
 the room at it. A result contains the JSON report plus immutable execution provenance (profile,
 digest-pinned problem image, inference policy, and job id).
 
@@ -42,26 +43,61 @@ rejected by the supplied build/deploy configuration.
 ## Privileged request contract
 
 `POST /run` is HMAC-authenticated over its exact JSON bytes and requires a one-time nonce,
-`issued_at`, `expires_at`, `bundle_sha256`, the candidate bundle, and the miner's sealed key. The
+`issued_at`, `expires_at`, `bundle_sha256`, the candidate bundle, and the miner's sealed credential. The
 room accepts only short-lived requests and reserves every nonce before execution, preventing replay.
 The quote binds `report`, `bundle_sha256`, and immutable profile provenance to the nonce and project.
-Profiles must never fall back to an operator-supplied inference key: the sealed key in each request
-is the sole key source. Candidate bundles are bounded before extraction.
+Before invoking a profile, the room bounds and extracts the candidate bundle, then verifies the
+encrypted descriptor's `bundle_binding` against every bundle file except the ciphertext itself. A
+validator therefore cannot take the public ciphertext from a PR and run it with a substituted agent
+to expose the key. Profiles must never fall back to an operator-supplied inference key: the sealed
+credential in each request is the sole key source.
 
 ## Miner-funded inference routes
 
-`room/inference_gateway.py` is part of this generic runner. A subnet configures provider routes
-in its deployment, but never needs to copy or modify runner security code:
+`room/inference_gateway.py` is part of this generic runner. A deployment configures a JSON registry
+of approved provider routes; a subnet never needs to copy or modify runner security code:
 
-- Set `KATA_INFERENCE_GATEWAY_UPSTREAM` for an OpenAI-compatible proxy. The gateway passes the
-  miner's key in `x-inference-api-key` and preserves the request body.
-- Or set both `KATA_INFERENCE_GATEWAY_DIRECT_KEY_PREFIXES` and
-  `KATA_INFERENCE_GATEWAY_DIRECT_UPSTREAM` for a direct provider. The prefix list controls which
-  miner keys use that route; `*` means every miner key. Configure the optional auth-header/template
-  variables when the provider does not use `Authorization: Bearer <key>`.
+- Set `KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON` to an object keyed by stable provider ids. Each
+  route has an exact `upstream` URL, optional `auth_header`, optional `auth_value_template` containing
+  `{api_key}`, and optional fixed `headers`.
+- Provider ids are generic. A registry may include `openrouter`, `chutes`, `akashml`, or any other
+  provider with a reviewed HTTP endpoint and credential format. The runner does not embed provider
+  brands, API-key prefixes, or subnet-specific endpoints.
+- A miner seals `{version, provider, api_key, bundle_binding}` locally. `provider` must be an enabled
+  registry id; an arbitrary URL is never accepted from the miner.
+- For a job, the room gives the agent a signed `INFERENCE_API` route. The agent calls
+  `POST $INFERENCE_API/inference` with `x-inference-api-key`. The signed path binds the encrypted
+  provider choice, so the agent cannot switch the key to another allowlisted provider.
 
-At least one matching route is required. A missing miner key is rejected before any provider call.
-The gateway permits only inference traffic from agents; it does not select models, limit tokens or
-calls, track cost, or provide a validator-funded fallback. Runtime billing remains the deployment
-platform's responsibility: a production operator must use a provider/TEE deployment that charges
-the miner before forwarding a job to this room.
+For example, a deployment could use this shape (fill each exact endpoint from the provider's reviewed
+documentation):
+
+```json
+{
+  "openrouter": {"upstream": "https://<openrouter-chat-endpoint>"},
+  "chutes": {"upstream": "https://<chutes-chat-endpoint>"},
+  "akashml": {"upstream": "https://<akashml-chat-endpoint>"}
+}
+```
+
+At least one enabled route is required. A missing miner key, tampered route, or unenabled provider is
+rejected before any provider call. The gateway permits only inference traffic from agents; it does
+not select models, limit tokens or calls, track cost, or provide a validator-funded fallback. API
+billing follows the miner's provider key. TEE/runtime billing remains the deployment platform's
+responsibility and must be charged to the miner before it forwards a job to this room.
+
+## Miner sealing command
+
+After verifying the room's `/pubkey` attestation, the miner runs `kata_seal.py` locally:
+
+```bash
+python kata_seal.py \
+  --room https://<approved-room> \
+  --provider openrouter \
+  --key <miner-provider-key> \
+  --bundle ./submission \
+  --measurement <approved-compose-hash>
+```
+
+It writes only encrypted ciphertext to `sealed_inference_key`. The miner adds that file to the PR;
+the owner and validator see ciphertext, not the key, provider descriptor, or bundle-binding payload.

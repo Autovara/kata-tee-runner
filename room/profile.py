@@ -19,6 +19,22 @@ class TeeJobResult:
     provenance: dict[str, object]
 
 
+@dataclass(frozen=True)
+class MinerInferenceCredential:
+    """A miner-owned provider credential decrypted only inside the sealed room.
+
+    ``provider`` is an opaque, allowlisted route identifier.  ``api_key`` and
+    ``bundle_binding`` are never returned by the room or included in attestation
+    provenance.  Binding the credential to the submitted agent bundle prevents a
+    validator from replaying a public ciphertext with a different agent to reveal
+    the miner's key.
+    """
+
+    provider: str
+    api_key: str
+    bundle_binding: str
+
+
 class TeeJobProfile(Protocol):
     #: project_key that selects the no-docker plumbing stub (local tests).
     fixture_project: str
@@ -27,12 +43,14 @@ class TeeJobProfile(Protocol):
         self,
         *,
         project_key: str,
-        sealed_key: str,
-        bundle_b64: str,
+        credential: MinerInferenceCredential | None,
+        bundle_root: str | None,
         job_id: str,
         bundle_sha256: str,
     ) -> TeeJobResult:
         """Run the miner's agent for ``project_key`` inside the room and return its report (a
-        JSON-able dict) and immutable execution provenance. Talks only to the in-room gateway for
-        inference. ``fixture_project`` selects a lightweight stub."""
+        JSON-able dict) and immutable execution provenance.  The generic room has already bounded
+        and extracted ``bundle_root`` and verified any credential's binding before this method is
+        called.  Talks only to the in-room gateway for inference. ``fixture_project`` selects a
+        lightweight stub."""
         ...
