@@ -1,15 +1,29 @@
 """Plumbing test for the subnet-blind sealed-room server: it loads whatever profile
 KATA_TEE_PROFILE names (here the in-repo FakeProfile) and runs the same attestation-bound /run flow
-— proving the base names no subnet. Mirrors the binding assertions any subnet runner is held to."""
+— proving the base names no subnet. Mirrors the binding assertions any subnet runner is held to,
+and covers the /run request authentication (room.auth)."""
 
 import hashlib
+import json
 
+from room import auth
 from room.attest import bind_and_quote, canonical
 from room.server import PROFILE, app
 
 
+def _post_run(body: dict, *, signature: str | None = "__valid__"):
+    """POST /run with a valid HMAC signature by default; pass signature=None to omit it, or a string
+    to force a specific (e.g. wrong) signature."""
+    raw = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    if signature == "__valid__":
+        headers[auth.SIGNATURE_HEADER] = auth.sign(raw)
+    elif signature is not None:
+        headers[auth.SIGNATURE_HEADER] = signature
+    return app.test_client().post("/run", data=raw, headers=headers)
+
+
 def test_profile_is_loaded_generically_from_env():
-    # The base imported no subnet; it loaded the profile named by KATA_TEE_PROFILE.
     assert type(PROFILE).__name__ == "FakeProfile"
 
 
@@ -28,12 +42,9 @@ def test_bind_and_quote_binds_answer_project_and_nonce():
 
 def test_run_uses_the_loaded_profile_and_binds():
     nonce = "cc" * 16
-    resp = app.test_client().post(
-        "/run", json={"nonce": nonce, "project_key": "proj-x"}
-    )
+    resp = _post_run({"nonce": nonce, "project_key": "proj-x"})
     data = resp.get_json()
     assert resp.status_code == 200
-    # The report came from the loaded profile (FakeProfile echoes the project_key).
     assert data["report"] == {"findings": ["proj-x"]}
     answer_hash = hashlib.sha256(canonical({"findings": ["proj-x"]})).digest()
     report_data = hashlib.sha256(bytes.fromhex(nonce) + b"proj-x" + answer_hash).digest()
@@ -42,5 +53,32 @@ def test_run_uses_the_loaded_profile_and_binds():
 
 
 def test_run_rejects_non_hex_nonce():
-    resp = app.test_client().post("/run", json={"nonce": "zz", "project_key": "proj-x"})
-    assert resp.status_code == 400
+    assert _post_run({"nonce": "zz", "project_key": "proj-x"}).status_code == 400
+
+
+def test_run_rejects_unsigned_request():
+    # No signature header -> 401. This is the fix for the key-exfil vuln: an attacker can't invoke
+    # /run (so can't have a victim's sealed key decrypted into their agent).
+    assert _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature=None).status_code == 401
+
+
+def test_run_rejects_bad_signature():
+    assert _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature="deadbeef").status_code == 401
+
+
+def test_run_rejects_tampered_body_after_signing():
+    # A signature is over the exact bytes; changing the body invalidates it.
+    raw = json.dumps({"nonce": "cc" * 16, "project_key": "proj-x"}).encode()
+    sig = auth.sign(raw)
+    tampered = raw.replace(b"proj-x", b"proj-EVIL")
+    resp = app.test_client().post(
+        "/run", data=tampered,
+        headers={"Content-Type": "application/json", auth.SIGNATURE_HEADER: sig},
+    )
+    assert resp.status_code == 401
+
+
+def test_run_fails_closed_when_secret_unconfigured(monkeypatch):
+    monkeypatch.delenv(auth.AUTH_SECRET_ENV, raising=False)
+    resp = _post_run({"nonce": "cc" * 16, "project_key": "proj-x"}, signature=None)
+    assert resp.status_code == 503

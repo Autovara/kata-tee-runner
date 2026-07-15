@@ -20,12 +20,13 @@ Secrets arrive as sealed env vars (delivered to the attested room; NEVER hardcod
 import binascii
 import hashlib
 import importlib
+import json
 import os
 import traceback
 
 from flask import Flask, jsonify, request
 
-from room import sealing
+from room import auth, sealing
 from room.attest import bind_and_quote
 from room.dstack import client
 from room.relay_net import docker, ghcr_login
@@ -91,27 +92,31 @@ def pull_test():
         return jsonify(ok=False, error=str(exc), where=traceback.format_exc()[-1200:]), 500
 
 
-@app.route("/run", methods=["GET", "POST"])
+@app.route("/run", methods=["POST"])
 def run():
+    # /run runs a caller-supplied agent with a decrypted key injected, so it is authenticated and
+    # POST-only. Fail closed if no shared secret is configured; reject a missing/invalid signature.
+    if not auth.is_configured():
+        return jsonify(error=f"room auth is not configured (set {auth.AUTH_SECRET_ENV})"), 503
+    raw = request.get_data()
+    if not auth.verify(raw, request.headers.get(auth.SIGNATURE_HEADER, "")):
+        return jsonify(error="unauthorized"), 401
     try:
-        return _run()
+        return _run(raw)
     except Exception as exc:  # noqa: BLE001 - surface the real cause
         return jsonify(error=str(exc), where=traceback.format_exc()[-1500:]), 500
 
 
-def _run():
-    # GET (manual testing) or POST (Kata passes each candidate's sealed key per request).
-    if request.method == "POST":
-        body = request.get_json(silent=True) or {}
-        nonce_hex = body.get("nonce", "")
-        project_key = body.get("project_key", PROFILE.fixture_project)
-        sealed_key = body.get("sealed_key", "")
-        bundle_b64 = body.get("bundle", "")  # base64 tar.gz of the miner's agent bundle
-    else:
-        nonce_hex = request.args.get("nonce", "")
-        project_key = request.args.get("project_key", PROFILE.fixture_project)
-        sealed_key = request.args.get("sealed_key", "")
-        bundle_b64 = ""
+def _run(raw: bytes):
+    # Parse the SAME bytes the signature covered (Kata passes each candidate's sealed key per run).
+    try:
+        body = json.loads(raw) if raw else {}
+    except ValueError:
+        return jsonify(error="body must be JSON"), 400
+    nonce_hex = body.get("nonce", "")
+    project_key = body.get("project_key", PROFILE.fixture_project)
+    sealed_key = body.get("sealed_key", "")
+    bundle_b64 = body.get("bundle", "")  # base64 tar.gz of the miner's agent bundle
     try:
         nonce = binascii.unhexlify(nonce_hex)
     except (binascii.Error, ValueError):

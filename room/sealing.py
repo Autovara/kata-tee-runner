@@ -14,13 +14,18 @@ def sealing_privkey() -> bytes:
 
 
 def resolve_inference_key(sealed_param: str = "") -> str:
-    """The miner's inference key. Prefer a per-request sealed blob (so ONE room can serve many
-    candidates, each with its own key), then a deploy-time SEALED_INFERENCE_KEY, then a plaintext
-    env var (test only). Sealed blobs are decrypted INSIDE the room; the owner only handled the
-    ciphertext."""
-    sealed = (sealed_param or os.environ.get("SEALED_INFERENCE_KEY", "")).strip()
-    if sealed:
-        from ecies import decrypt as ecies_decrypt
+    """The miner's inference key, decrypted INSIDE the room. Prefer a per-request sealed blob (so ONE
+    room serves many candidates, each with its own key), then a deploy-time SEALED_INFERENCE_KEY.
 
-        return ecies_decrypt(sealing_privkey(), bytes.fromhex(sealed)).decode()
-    return os.environ.get("INFERENCE_API_KEY", "")
+    There is deliberately NO plaintext env-var fallback: a run with no sealed key is invalid and
+    raises, so a caller can never coax the room into injecting a shared/owner key into their agent.
+    """
+    sealed = (sealed_param or os.environ.get("SEALED_INFERENCE_KEY", "")).strip()
+    if not sealed:
+        raise RuntimeError(
+            "no sealed inference key for this run (a sealed key is required; there is no plaintext "
+            "fallback)"
+        )
+    from ecies import decrypt as ecies_decrypt
+
+    return ecies_decrypt(sealing_privkey(), bytes.fromhex(sealed)).decode()
