@@ -87,6 +87,21 @@ not select models, limit tokens or calls, track cost, or provide a validator-fun
 billing follows the miner's provider key. TEE/runtime billing remains the deployment platform's
 responsibility and must be charged to the miner before it forwards a job to this room.
 
+## Runtime timeouts
+
+Timeouts protect room capacity; they do not constrain a miner's model, tokens, call count, retry
+strategy, or provider spending. The production defaults are deliberately ordered:
+
+| Layer | Setting | Default |
+| --- | --- | --- |
+| One provider request through the gateway | `KATA_INFERENCE_GATEWAY_TIMEOUT` | 180 seconds |
+| Whole untrusted agent process (implemented by the subnet profile) | `KATA_TEE_AGENT_EXECUTION_TIMEOUT_SECONDS` | 840 seconds |
+
+An agent should set its own HTTP client timeout slightly above the gateway timeout. The active SN60
+contract recommends 195 seconds. A profile must apply the generic total-process setting when it
+starts its agent container. This leaves the deployment free to support other subnets without
+copying a provider-specific policy into the room.
+
 ## Miner sealing command
 
 After verifying the room's `/pubkey` attestation, the miner runs `kata_seal.py` locally:

@@ -7,8 +7,35 @@ miner agent against it to produce a report.
 This is the generic contract; a subnet's implementation lives in the subnet's own package and is
 loaded at startup via ``KATA_TEE_PROFILE=<module>:<Class>``."""
 
+import os
 from dataclasses import dataclass
 from typing import Protocol
+
+# A profile owns the mechanics of starting an untrusted agent container, but all
+# profiles should use the same deployment knob for its total wall-clock budget.
+# This limits a stuck process; it is deliberately not a model, token, call, or
+# retry budget.
+AGENT_EXECUTION_TIMEOUT_ENV = "KATA_TEE_AGENT_EXECUTION_TIMEOUT_SECONDS"
+DEFAULT_AGENT_EXECUTION_TIMEOUT_SECONDS = 840
+
+
+def resolve_agent_execution_timeout_seconds() -> float:
+    """Return the configured total agent-process timeout for a TEE profile.
+
+    Fail closed on a malformed value so a deployment typo is visible before an
+    untrusted candidate gets an unexpectedly long execution allowance.
+    """
+
+    raw = os.environ.get(AGENT_EXECUTION_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return float(DEFAULT_AGENT_EXECUTION_TIMEOUT_SECONDS)
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{AGENT_EXECUTION_TIMEOUT_ENV} must be a positive number") from exc
+    if timeout <= 0:
+        raise RuntimeError(f"{AGENT_EXECUTION_TIMEOUT_ENV} must be a positive number")
+    return timeout
 
 
 @dataclass(frozen=True)

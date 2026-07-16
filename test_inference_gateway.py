@@ -116,7 +116,7 @@ def test_timeout_is_transport_configuration_not_inference_policy(monkeypatch) ->
     monkeypatch.setenv("KATA_INFERENCE_GATEWAY_TIMEOUT", "12.5")
     assert resolve_timeout() == 12.5
     monkeypatch.setenv("KATA_INFERENCE_GATEWAY_TIMEOUT", "invalid")
-    assert resolve_timeout() == 900.0
+    assert resolve_timeout() == 180.0
 
 
 def test_gateway_routes_each_signed_job_to_its_sealed_provider(gateway_and_provider) -> None:

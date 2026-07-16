@@ -27,7 +27,10 @@ from urllib.request import Request, urlopen
 
 from room import auth
 
-DEFAULT_TIMEOUT_SECONDS = 900
+# This is a transport safety limit for one upstream request, not an inference
+# policy. The miner still chooses model, token/call/retry settings and pays the
+# provider. Keep it below the agent and room request deadlines.
+DEFAULT_TIMEOUT_SECONDS = 180
 
 PROVIDER_ROUTES_ENV = "KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON"
 TIMEOUT_ENV = "KATA_INFERENCE_GATEWAY_TIMEOUT"
