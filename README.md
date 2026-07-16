@@ -1,20 +1,16 @@
 # kata-tee-runner — the generic sealed-room TEE runner
 
-A "sealed room" (also called a TEE, a trusted execution environment) is a locked container running on
-hardware that can prove what is inside it. Here it runs a miner's untrusted agent, lets that agent pay
-for its own inference with the miner's sealed API key, and returns a hardware-signed proof of exactly
-what it ran. This repo is the generic room; any subnet reuses it by supplying a small profile, so the
-room itself knows nothing about a specific subnet. For the SN60 profile, see [`../kata-sn60`](../kata-sn60).
+A "sealed room" (a TEE, or trusted execution environment) is a locked container running on hardware
+that can prove what is inside it. This room runs a miner's untrusted agent, lets that agent pay for its
+own inference with the miner's sealed API key, and returns a hardware **attestation** that binds the
+answer to the exact project and round. It seals the miner's provider credential to that miner's exact
+submission bundle, runs the agent behind an in-room **miner-funded inference gateway** with no other
+internet, and never exposes the plaintext key: the maintainer and validators handle only ciphertext,
+and neither pays for inference.
 
-A **subnet-blind** Phala confidential-VM "safe room": it seals a miner's provider credential,
-binds it to that miner's exact submission bundle, then runs the agent behind an in-room
-**miner-funded inference gateway**. The agent has no direct internet while its own provider key
-pays for unchanged inference requests. The room returns the answer plus a
-hardware **attestation** whose report-data binds the answer to the project + round nonce. The
-maintainer and validator handle only ciphertext; neither receives the plaintext provider key or
-provider descriptor, and neither pays for inference.
-
-Any subnet reuses this room by shipping a small **profile** — this base names no subnet.
+This repo is the **subnet-blind** base. Any subnet reuses it by shipping a small profile, so the room
+itself names no subnet. For the SN60 profile and the miner-facing submission guide, see
+[kata-sn60](https://github.com/Autovara/kata-sn60).
 
 ```
 room/                 the generic core
@@ -111,12 +107,14 @@ copying a provider-specific policy into the room.
 
 ## Miner sealing command
 
-After verifying the room's `/pubkey` attestation, the miner runs `kata_seal.py` locally:
+After verifying the room's `/pubkey` attestation, the miner runs `kata_seal.py` locally. Get the exact
+room URL, measurement, and the providers you may use from the subnet's repo (for SN60,
+[kata-sn60](https://github.com/Autovara/kata-sn60)):
 
 ```bash
 python kata_seal.py \
   --room https://<approved-room> \
-  --provider openrouter \
+  --provider <provider-id> \
   --key <miner-provider-key> \
   --bundle ./submission \
   --measurement <approved-compose-hash>
