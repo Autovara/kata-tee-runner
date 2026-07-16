@@ -1,5 +1,11 @@
 # kata-tee-runner — the generic sealed-room TEE runner
 
+A "sealed room" (also called a TEE, a trusted execution environment) is a locked container running on
+hardware that can prove what is inside it. Here it runs a miner's untrusted agent, lets that agent pay
+for its own inference with the miner's sealed API key, and returns a hardware-signed proof of exactly
+what it ran. This repo is the generic room; any subnet reuses it by supplying a small profile, so the
+room itself knows nothing about a specific subnet. For the SN60 profile, see [`../kata-sn60`](../kata-sn60).
+
 A **subnet-blind** Phala confidential-VM "safe room": it seals a miner's provider credential,
 binds it to that miner's exact submission bundle, then runs the agent behind an in-room
 **miner-funded inference gateway**. The agent has no direct internet while its own provider key
@@ -14,7 +20,8 @@ Any subnet reuses this room by shipping a small **profile** — this base names 
 room/                 the generic core
   server.py           /health /pubkey /run; signed diagnostic /pull-test only when enabled
   sealing.py          encrypted miner-provider credential handling
-  inference_network.py miner-funded gateway + sealed internal network + registry login
+  inference_gateway.py the miner-funded gateway HTTP handler (signed per-job routes)
+  inference_network.py starts the gateway, the sealed internal network, and registry login
   attest.py           canonical() + bind_and_quote() (binds report + bundle hash + provenance)
   dstack.py           the confidential-VM client
   profile.py          the TeeJobProfile seam a subnet implements
