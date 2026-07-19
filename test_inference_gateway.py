@@ -32,6 +32,17 @@ class RecordingProvider(BaseHTTPRequestHandler):
         if self.headers.get("X-Upstream-Boom") == "yes":
             self._reply(502, {"detail": "provider boom"})
             return
+        if self.headers.get("X-Upstream-Flaky-503") == "yes":
+            count = getattr(self.server, "flaky_calls", 0) + 1
+            self.server.flaky_calls = count  # type: ignore[attr-defined]
+            if count == 1:
+                self._reply(503, {"detail": "temporarily unavailable"})
+                return
+            self._reply(200, {"ok": True, "attempt": count}, extra_header=("X-Provider", "yes"))
+            return
+        if self.headers.get("X-Upstream-429") == "yes":
+            self._reply(429, {"detail": "rate limited"})
+            return
         self._reply(200, {"ok": True}, extra_header=("X-Provider", "yes"))
 
     def _reply(self, status: int, payload: dict, extra_header=None) -> None:
@@ -70,6 +81,8 @@ def _routes(provider_url: str) -> str:
 @pytest.fixture
 def gateway_and_provider(monkeypatch):
     monkeypatch.setenv(auth.AUTH_SECRET_ENV, "room-test-secret")
+    # Keep the transient-upstream retry backoff instant so tests stay fast.
+    monkeypatch.setenv("KATA_INFERENCE_GATEWAY_RETRY_BASE_SECONDS", "0")
     provider = ThreadingHTTPServer(("127.0.0.1", 0), RecordingProvider)
     provider.records = []  # type: ignore[attr-defined]
     provider.daemon_threads = True
@@ -226,6 +239,33 @@ def test_gateway_passes_provider_http_errors_through(gateway_and_provider) -> No
             {"X-Upstream-Boom": "yes", "x-inference-api-key": "miner-key"},
         )
     assert error.value.code == 502
+
+
+def test_gateway_retries_a_transient_upstream_and_relays_success(gateway_and_provider) -> None:
+    base, provider = gateway_and_provider
+    status, body, _headers = post(
+        inference_url(base, "openrouter"),
+        b"{}",
+        {"X-Upstream-Flaky-503": "yes", "x-inference-api-key": "miner-key"},
+    )
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+    # first attempt 503, retried once with success -> exactly two upstream calls.
+    assert len(provider.records) == 2
+
+
+def test_gateway_does_not_retry_a_non_transient_upstream(gateway_and_provider) -> None:
+    base, provider = gateway_and_provider
+    with pytest.raises(HTTPError) as error:
+        post(
+            inference_url(base, "openrouter"),
+            b"{}",
+            {"X-Upstream-429": "yes", "x-inference-api-key": "miner-key"},
+        )
+    # An exhausted-key / rate-limit 4xx is the miner's own fault: relayed verbatim,
+    # never retried.
+    assert error.value.code == 429
+    assert len(provider.records) == 1
 
 
 def test_inference_network_creates_a_signed_provider_bound_url(monkeypatch) -> None:

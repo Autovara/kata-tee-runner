@@ -17,8 +17,10 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import random
 import re
 import sys
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -34,6 +36,14 @@ DEFAULT_TIMEOUT_SECONDS = 180
 
 PROVIDER_ROUTES_ENV = "KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON"
 TIMEOUT_ENV = "KATA_INFERENCE_GATEWAY_TIMEOUT"
+MAX_ATTEMPTS_ENV = "KATA_INFERENCE_GATEWAY_MAX_ATTEMPTS"
+RETRY_BASE_SECONDS_ENV = "KATA_INFERENCE_GATEWAY_RETRY_BASE_SECONDS"
+
+# Only transient upstream failures are retried: a dropped/refused connection or a
+# 502/503/504. A 4xx (including a 401/403/429 exhausted-key) or any other status
+# is the miner's own provider/agent fault and is relayed verbatim, never retried.
+_RETRYABLE_UPSTREAM_STATUS = frozenset({502, 503, 504})
+DEFAULT_MAX_ATTEMPTS = 2
 
 DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_VALUE_TEMPLATE = "Bearer {api_key}"
@@ -184,6 +194,31 @@ def resolve_timeout() -> float:
     return float(DEFAULT_TIMEOUT_SECONDS)
 
 
+def resolve_max_attempts() -> int:
+    """How many times to attempt one upstream request before giving up (1..4)."""
+
+    raw = os.environ.get(MAX_ATTEMPTS_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_MAX_ATTEMPTS
+        if 1 <= value <= 4:
+            return value
+    return DEFAULT_MAX_ATTEMPTS
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    """Short exponential backoff with jitter before retrying a transient upstream."""
+
+    try:
+        base = float(os.environ.get(RETRY_BASE_SECONDS_ENV, "0.5") or "0.5")
+    except ValueError:
+        base = 0.5
+    delay = min(5.0, max(0.0, base) * (2 ** (attempt - 1)))
+    return delay + random.uniform(0.0, delay * 0.25)
+
+
 def make_job_route_token(job_id: str, provider: str) -> str:
     """Make the provider-bound route token passed to an untrusted agent.
 
@@ -260,16 +295,40 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
         except GatewayConfigurationError as error:
             self._send_json(502, {"status": "error", "detail": str(error)})
             return
-        try:
-            with urlopen(request, timeout=resolve_timeout()) as response:
-                self._relay_response(response.status, response.headers.items(), response.read())
-        except HTTPError as error:
-            self._relay_response(error.code, error.headers.items(), error.read())
-        except URLError as error:
-            self._send_json(
-                502,
-                {"status": "error", "detail": f"gateway could not reach provider: {error.reason}"},
-            )
+        attempts = resolve_max_attempts()
+        for attempt in range(1, attempts + 1):
+            try:
+                with urlopen(request, timeout=resolve_timeout()) as response:
+                    self._relay_response(
+                        response.status, response.headers.items(), response.read()
+                    )
+                return
+            except HTTPError as error:
+                # A transient upstream (502/503/504) is retried; every other status
+                # -- including an exhausted-key 401/403/429 -- is the miner's own
+                # fault and is relayed verbatim so the agent sees the real error.
+                if error.code in _RETRYABLE_UPSTREAM_STATUS and attempt < attempts:
+                    error.close()
+                    time.sleep(_retry_backoff_seconds(attempt))
+                    continue
+                self._relay_response(error.code, error.headers.items(), error.read())
+                return
+            except URLError as error:
+                # Connection dropped/refused/timed out before a response: safe to retry.
+                if attempt < attempts:
+                    time.sleep(_retry_backoff_seconds(attempt))
+                    continue
+                self._send_json(
+                    502,
+                    {
+                        "status": "error",
+                        "detail": (
+                            f"gateway could not reach provider after {attempts} "
+                            f"attempt(s): {error.reason}"
+                        ),
+                    },
+                )
+                return
 
     def _safe_request_headers(self) -> dict[str, str]:
         return {
