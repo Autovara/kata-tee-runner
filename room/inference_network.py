@@ -60,14 +60,50 @@ def start_inference_gateway_once():
     time.sleep(1.0)  # Let it bind before the first agent call.
 
 
+def _docker_already_exists(process) -> bool:
+    """Whether a docker command failed only because the object already exists."""
+    return "already exists" in (process.stderr or "").lower()
+
+
+def _require_internal_network(name: str) -> None:
+    """Fail closed unless ``name`` is an internal (egress-blocked) Docker network.
+
+    An agent runs on this network carrying the miner's decrypted inference key. If a
+    network with this name already exists but is NOT internal (created without
+    ``--internal``, e.g. a leftover or a misconfiguration), the agent could reach the
+    public internet with that key. Refuse to proceed rather than run on it.
+    """
+    inspect = docker(["network", "inspect", "-f", "{{.Internal}}", name])
+    if inspect.returncode != 0:
+        raise RuntimeError(
+            f"could not inspect inference network {name!r}: {inspect.stderr[:300]}"
+        )
+    if inspect.stdout.strip().lower() != "true":
+        raise RuntimeError(
+            f"inference network {name!r} is not internal (Internal={inspect.stdout.strip()!r}); "
+            "refusing to run an agent with its inference key on a network that can reach "
+            "the internet"
+        )
+
+
 def ensure_inference_network_once():
-    """Create the egress-blocked network on which an agent can reach only the gateway."""
+    """Create the egress-blocked network on which an agent can reach only the gateway.
+
+    Fails closed: the network must exist AND be internal before any agent runs on it.
+    """
     global _inference_network_ready
     if _inference_network_ready:
         return
-    docker(["network", "create", "--internal", INF_NET])  # Ignore already-exists failures.
+    create = docker(["network", "create", "--internal", INF_NET])
+    if create.returncode != 0 and not _docker_already_exists(create):
+        raise RuntimeError(
+            f"failed to create internal inference network {INF_NET!r}: {create.stderr[:300]}"
+        )
+    # Even when the network already existed, verify it is internal -- never trust a
+    # pre-existing network of this name to be egress-blocked.
+    _require_internal_network(INF_NET)
     own_container = socket.gethostname()
-    docker(
+    connect = docker(
         [
             "network",
             "connect",
@@ -77,6 +113,12 @@ def ensure_inference_network_once():
             own_container,
         ]
     )
+    # Tolerate the gateway already being attached; fail on any other connect error so
+    # the gateway is guaranteed reachable on the sealed network before agents run.
+    if connect.returncode != 0 and not _docker_already_exists(connect):
+        raise RuntimeError(
+            f"failed to connect the inference gateway to {INF_NET!r}: {connect.stderr[:300]}"
+        )
     _inference_network_ready = True
 
 
