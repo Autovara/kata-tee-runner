@@ -21,7 +21,7 @@ room/                 the generic core
   attest.py           canonical() + bind_and_quote() (binds report + bundle hash + provenance)
   dstack.py           the confidential-VM client
   profile.py          the TeeJobProfile seam a subnet implements
-kata_seal.py step0_check.py verify_run.py   miner/operator tools
+kata_seal.py verify_run.py                  miner/operator tools
 Dockerfile.base       the base image (a subnet builds FROM it)
 pyproject.toml        runtime and development dependencies
 ```
