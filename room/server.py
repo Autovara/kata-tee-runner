@@ -11,7 +11,7 @@ Two modes on /run, chosen by project_key:
   * any real project_key                    -> the profile pulls + runs the problem in the room.
 
 Both return: the answer (report) + an attestation quote whose report-data BINDS the answer +
-project + round nonce.
+project + challenge nonce.
 
 Deployment secrets arrive as sealed environment variables (delivered to the
 attested room; never hardcoded):

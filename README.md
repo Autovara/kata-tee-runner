@@ -3,7 +3,7 @@
 A "sealed room" (a TEE, or trusted execution environment) is a locked container running on hardware
 that can prove what is inside it. This room runs a miner's untrusted agent, lets that agent pay for its
 own inference with the miner's sealed API key, and returns a hardware **attestation** that binds the
-answer to the exact project and round. It seals the miner's provider credential to that miner's exact
+answer to the exact project and challenge. It seals the miner's provider credential to that miner's exact
 submission bundle, runs the agent behind an in-room **miner-funded inference gateway** with no other
 internet, and never exposes the plaintext key: the maintainer and validators handle only ciphertext,
 and neither pays for inference.
