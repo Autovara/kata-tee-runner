@@ -68,7 +68,10 @@ def test_preexisting_internal_network_with_gateway_already_attached_is_ok(monkey
         if args[:2] == ["network", "inspect"]:
             return _proc(stdout="true\n")
         if args[:2] == ["network", "connect"]:
-            return _proc(returncode=1, stderr="endpoint with name runner-container already exists in network")
+            return _proc(
+                returncode=1,
+                stderr="endpoint with name runner-container already exists in network",
+            )
         return _proc()
 
     _install_fake_docker(monkeypatch, responder)
