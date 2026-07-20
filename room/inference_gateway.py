@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from room import auth
+from room.ids import PROVIDER_ID_REGEX
 
 # This is a transport safety limit for one upstream request, not an inference
 # policy. The miner still chooses model, token/call/retry settings and pays the
@@ -49,9 +50,9 @@ DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_VALUE_TEMPLATE = "Bearer {api_key}"
 
 HEALTH_PATH = "/healthz"
-_PROVIDER_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_PROVIDER_PATTERN = re.compile(PROVIDER_ID_REGEX + r"\Z")
 _JOB_ROUTE_PATTERN = re.compile(
-    r"/j/(?P<job_id>[0-9a-f]{16,64})~(?P<provider>[a-z][a-z0-9_-]{0,63})~"
+    r"/j/(?P<job_id>[0-9a-f]{16,64})~(?P<provider>" + PROVIDER_ID_REGEX + r")~"
     r"(?P<signature>[0-9a-f]{64})/inference\Z"
 )
 _HEADER_NAME_PATTERN = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+\Z")

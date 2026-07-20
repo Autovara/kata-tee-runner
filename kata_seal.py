@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from room.bundle import credential_bundle_binding
+from room.ids import PROVIDER_ID_REGEX
 
 
 def fetch_pubkey(room: str) -> dict:
@@ -99,7 +100,7 @@ def main() -> None:
         help="skip attestation check (NOT recommended)",
     )
     args = ap.parse_args()
-    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", args.provider):
+    if not re.fullmatch(PROVIDER_ID_REGEX, args.provider):
         raise SystemExit("ERROR: --provider must use lowercase letters, digits, _ or -.")
     if not args.key.strip():
         raise SystemExit("ERROR: --key must not be empty or whitespace only.")

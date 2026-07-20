@@ -12,12 +12,13 @@ import json
 import re
 
 from room.dstack import get_client
+from room.ids import PROVIDER_ID_REGEX
 from room.profile import MinerInferenceCredential
 
 SEALING_KEY_PATH = "kata/sealing"
 _CREDENTIAL_VERSION = 1
 _CREDENTIAL_FIELDS = frozenset({"version", "provider", "api_key", "bundle_binding"})
-_PROVIDER_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+_PROVIDER_PATTERN = re.compile(PROVIDER_ID_REGEX + r"\Z")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
