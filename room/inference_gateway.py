@@ -15,6 +15,7 @@ the miner's own credential.
 from __future__ import annotations
 
 import hmac
+import itertools
 import json
 import os
 import random
@@ -50,6 +51,18 @@ DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_VALUE_TEMPLATE = "Bearer {api_key}"
 
 HEALTH_PATH = "/healthz"
+
+# Observability (SAFE): a per-request COUNTER plus the provider id and the upstream STATUS code
+# only -- never the request/response body and never the miner key (that is exactly why
+# ``log_message`` stays a no-op). This lets the operator confirm from the room log that an agent's
+# inference actually reaches the gateway and is forwarded to the provider (vs. never arriving).
+_request_counter = itertools.count(1)
+
+
+def _log_gateway(message: str) -> None:
+    print(f"GATEWAY {message}", file=sys.stderr, flush=True)
+
+
 _PROVIDER_PATTERN = re.compile(PROVIDER_ID_REGEX + r"\Z")
 _JOB_ROUTE_PATTERN = re.compile(
     r"/j/(?P<job_id>[0-9a-f]{16,64})~(?P<provider>" + PROVIDER_ID_REGEX + r")~"
@@ -275,9 +288,12 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
         self._forward(provider)
 
     def _forward(self, provider: str) -> None:
+        req = next(_request_counter)
+        _log_gateway(f"req#{req} provider={provider} received")
         body = self._read_body()
         api_key = self.headers.get("x-inference-api-key", "").strip()
         if not api_key:
+            _log_gateway(f"req#{req} provider={provider} -> 401 no-miner-key")
             self._send_json(
                 401,
                 {"status": "error", "detail": "A miner inference API key is required."},
@@ -294,12 +310,17 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
                 request_headers=self._safe_request_headers(),
             )
         except GatewayConfigurationError as error:
+            _log_gateway(f"req#{req} provider={provider} -> 502 provider-not-enabled")
             self._send_json(502, {"status": "error", "detail": str(error)})
             return
         attempts = resolve_max_attempts()
         for attempt in range(1, attempts + 1):
             try:
                 with urlopen(request, timeout=resolve_timeout()) as response:
+                    _log_gateway(
+                        f"req#{req} provider={provider} -> upstream {response.status} "
+                        f"(attempt {attempt})"
+                    )
                     self._relay_response(
                         response.status, response.headers.items(), response.read()
                     )
@@ -312,6 +333,7 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
                     error.close()
                     time.sleep(_retry_backoff_seconds(attempt))
                     continue
+                _log_gateway(f"req#{req} provider={provider} -> upstream {error.code}")
                 self._relay_response(error.code, error.headers.items(), error.read())
                 return
             except URLError as error:
@@ -319,6 +341,9 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
                 if attempt < attempts:
                     time.sleep(_retry_backoff_seconds(attempt))
                     continue
+                _log_gateway(
+                    f"req#{req} provider={provider} -> provider-unreachable ({error.reason})"
+                )
                 self._send_json(
                     502,
                     {

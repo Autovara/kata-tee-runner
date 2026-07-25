@@ -6,6 +6,7 @@ provider routes; it does not impose a model, token, call, retry, or cost policy.
 """
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -17,6 +18,9 @@ GHCR = "ghcr.io"
 INF_NET = "kata-inf-net"
 INFERENCE_GATEWAY_ALIAS = "kata-inference-gateway"
 INFERENCE_GATEWAY_PORT = "8000"
+# A per-job agent container is named ``kata-sn60-<hex>`` (see the SN60 tee_profile). The runner
+# container is ``dstack-kata-sn60-runner-1`` and can never match this anchored, hex-only pattern.
+_AGENT_CONTAINER_RE = re.compile(r"^kata-sn60-[0-9a-f]{12,64}$")
 
 _logged_in = False
 _gateway_process = None
@@ -96,6 +100,24 @@ def _network_endpoint_ids(name: str) -> list[str]:
     return [line.strip() for line in inspect.stdout.splitlines() if line.strip()]
 
 
+def cleanup_stale_agent_containers() -> None:
+    """Remove leftover per-job agent containers (``kata-sn60-<hex>``) from crashed/interrupted runs.
+
+    The SN60 profile removes each agent container in its ``finally``, but a room crash between
+    ``create`` and cleanup leaves one behind, and stopped ones accumulate on the persistent daemon
+    across runner restarts (a lingering one can also keep a stale ``kata-inf-net`` endpoint). This
+    runs at runner start, when no agent is running. The runner container itself
+    (``dstack-kata-sn60-runner-1``) never matches the anchored hex-only agent pattern, so it is
+    never touched.
+    """
+    listed = docker(["ps", "-a", "--format", "{{.Names}}"])
+    if listed.returncode != 0:
+        return
+    for name in listed.stdout.split():
+        if _AGENT_CONTAINER_RE.fullmatch(name.strip()):
+            docker(["rm", "-f", name.strip()])  # best effort
+
+
 def _reset_inference_network() -> None:
     """Tear ``kata-inf-net`` down and recreate it so ONLY the current runner holds the alias.
 
@@ -107,6 +129,7 @@ def _reset_inference_network() -> None:
     report. Force-disconnect every lingering endpoint, remove the network, and recreate it, so the
     live runner is the sole holder of the gateway alias.
     """
+    cleanup_stale_agent_containers()  # drop crashed leftovers (and any stale endpoint they hold)
     for endpoint_id in _network_endpoint_ids(INF_NET):
         docker(["network", "disconnect", "-f", INF_NET, endpoint_id])  # best effort
     docker(["network", "rm", INF_NET])  # best effort; tolerate "not found"

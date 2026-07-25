@@ -44,8 +44,11 @@ def _install_fake_docker(monkeypatch, responder, *, image="ghcr.io/x/runner@sha2
     return calls
 
 
-def _healthy_responder(*, endpoints="", internal="true", probe_rc=0, image="sha256:runnerimg"):
+def _healthy_responder(*, endpoints="", internal="true", probe_rc=0, image="sha256:runnerimg",
+                       container_names=""):
     def responder(args):
+        if args[:2] == ["ps", "-a"]:  # stale-agent-container cleanup listing
+            return _proc(stdout=container_names)
         if _is_endpoint_list(args):
             return _proc(stdout=endpoints)
         if _is_internal_check(args):
@@ -54,9 +57,25 @@ def _healthy_responder(*, endpoints="", internal="true", probe_rc=0, image="sha2
             return _proc(returncode=0 if image else 1, stdout=(image + "\n") if image else "")
         if args[:1] == ["run"]:  # the reachability probe
             return _proc(returncode=probe_rc, stderr="" if probe_rc == 0 else "connection refused")
-        return _proc()  # disconnect / rm / create / connect all succeed
+        return _proc()  # ps/disconnect / rm / create / connect all succeed
 
     return responder
+
+
+def test_stale_agent_containers_removed_but_runner_untouched(monkeypatch):
+    names = "\n".join([
+        "kata-sn60-ac8715c964e6100011122",   # leftover agent container -> remove
+        "kata-sn60-deadbeefdeadbeef0011",    # another leftover -> remove
+        "dstack-kata-sn60-runner-1",         # the RUNNER -> must NOT be removed
+        "some-other-container",
+    ])
+    calls = _install_fake_docker(monkeypatch, _healthy_responder(container_names=names))
+    inf.ensure_inference_network_once()
+    removed = [a[-1] for a in calls if a[:2] == ["rm", "-f"]]
+    assert "kata-sn60-ac8715c964e6100011122" in removed
+    assert "kata-sn60-deadbeefdeadbeef0011" in removed
+    assert "dstack-kata-sn60-runner-1" not in removed
+    assert "some-other-container" not in removed
 
 
 def test_clean_reset_and_reachable_marks_ready(monkeypatch):
