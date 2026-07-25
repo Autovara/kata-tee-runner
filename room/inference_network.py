@@ -86,39 +86,95 @@ def _require_internal_network(name: str) -> None:
         )
 
 
-def ensure_inference_network_once():
-    """Create the egress-blocked network on which an agent can reach only the gateway.
+def _network_endpoint_ids(name: str) -> list[str]:
+    """Full container IDs currently attached to network ``name`` (empty on any error)."""
+    inspect = docker(
+        ["network", "inspect", "-f", "{{range $id, $cfg := .Containers}}{{$id}}\n{{end}}", name]
+    )
+    if inspect.returncode != 0:
+        return []
+    return [line.strip() for line in inspect.stdout.splitlines() if line.strip()]
 
-    Fails closed: the network must exist AND be internal before any agent runs on it.
+
+def _reset_inference_network() -> None:
+    """Tear ``kata-inf-net`` down and recreate it so ONLY the current runner holds the alias.
+
+    The network is internal and PERSISTS on the daemon across runner-container restarts (it is
+    created here at runtime, not by compose). After the runner container restarts, the endpoint of
+    the previous, now-dead runner instance can linger on the network still holding the
+    ``kata-inference-gateway`` alias -- so an agent's DNS lookup resolves to a dead address, every
+    inference call fails at connect, and the room used to return a silent, zero-scoring empty
+    report. Force-disconnect every lingering endpoint, remove the network, and recreate it, so the
+    live runner is the sole holder of the gateway alias.
     """
-    global _inference_network_ready
-    if _inference_network_ready:
-        return
+    for endpoint_id in _network_endpoint_ids(INF_NET):
+        docker(["network", "disconnect", "-f", INF_NET, endpoint_id])  # best effort
+    docker(["network", "rm", INF_NET])  # best effort; tolerate "not found"
     create = docker(["network", "create", "--internal", INF_NET])
     if create.returncode != 0 and not _docker_already_exists(create):
         raise RuntimeError(
             f"failed to create internal inference network {INF_NET!r}: {create.stderr[:300]}"
         )
-    # Even when the network already existed, verify it is internal -- never trust a
-    # pre-existing network of this name to be egress-blocked.
+    # Never trust a pre-existing network of this name to be egress-blocked.
     _require_internal_network(INF_NET)
     own_container = socket.gethostname()
     connect = docker(
-        [
-            "network",
-            "connect",
-            "--alias",
-            INFERENCE_GATEWAY_ALIAS,
-            INF_NET,
-            own_container,
-        ]
+        ["network", "connect", "--alias", INFERENCE_GATEWAY_ALIAS, INF_NET, own_container]
     )
-    # Tolerate the gateway already being attached; fail on any other connect error so
-    # the gateway is guaranteed reachable on the sealed network before agents run.
     if connect.returncode != 0 and not _docker_already_exists(connect):
         raise RuntimeError(
             f"failed to connect the inference gateway to {INF_NET!r}: {connect.stderr[:300]}"
         )
+
+
+def _verify_gateway_reachable() -> None:
+    """Fail closed unless a throwaway container on the sealed network can reach the gateway.
+
+    This proves the exact path a real agent uses -- DNS-resolve ``kata-inference-gateway`` on
+    ``kata-inf-net`` and connect to it -- BEFORE any miner-funded agent runs. Without it a stale
+    endpoint or a dead gateway is invisible: the agent's calls fail silently, the room returns an
+    empty report, and the miner is scored 0 while never being charged. Refuse the run instead.
+    """
+    # Probe from the runner's OWN image (a locally-present python image) so the sealed, egress-less
+    # network need not pull anything and we depend on no compose-only variable.
+    own_container = socket.gethostname()
+    inspect = docker(["inspect", "-f", "{{.Image}}", own_container])
+    image = inspect.stdout.strip() if inspect.returncode == 0 else ""
+    if not image:
+        raise RuntimeError(
+            "could not resolve the runner image to self-test inference-gateway reachability: "
+            f"{(inspect.stderr or '').strip()[:200]}"
+        )
+    url = f"http://{INFERENCE_GATEWAY_ALIAS}:{INFERENCE_GATEWAY_PORT}/healthz"
+    probe = docker(
+        [
+            "run", "--rm", "--network", INF_NET, "--entrypoint", "python", image, "-c",
+            "import urllib.request,sys;"
+            f"sys.exit(0 if urllib.request.urlopen({url!r}, timeout=10).status == 200 else 1)",
+        ],
+        timeout=90,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "inference gateway is NOT reachable on the sealed network via alias "
+            f"{INFERENCE_GATEWAY_ALIAS!r}: {(probe.stderr or probe.stdout or '').strip()[:300]}. "
+            "Refusing to run an agent whose inference would silently fail and score the miner 0."
+        )
+
+
+def ensure_inference_network_once():
+    """Guarantee an egress-blocked network on which an agent can actually reach the gateway.
+
+    Fails closed on two counts: the network must be internal (no miner-key exfiltration), AND the
+    gateway must be provably reachable on it (no silent zero-score). Runs once per runner process --
+    i.e. once per (re)start, which is exactly when stale network state from a dead prior runner
+    exists.
+    """
+    global _inference_network_ready
+    if _inference_network_ready:
+        return
+    _reset_inference_network()
+    _verify_gateway_reachable()
     _inference_network_ready = True
 
 
