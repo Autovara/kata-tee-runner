@@ -294,3 +294,23 @@ def test_runner_starts_the_built_in_gateway_module(monkeypatch) -> None:
 
     assert commands[0][0] == [inference_network.sys.executable, "-m", "room.inference_gateway"]
     assert commands[0][1]["env"]["KATA_INFERENCE_GATEWAY_PORT"] == "8000"
+
+
+def test_job_inference_summary_buckets_statuses(tmp_path, monkeypatch):
+    import room.inference_gateway as gw
+    monkeypatch.setattr(gw, "INFERENCE_STATUS_DIR", str(tmp_path))
+    job = "a" * 24
+    for st in (200, 200, 402, 402, 402, 401, 403, 400, 0, 500):
+        gw._record_job_outcome(job, st)
+    s = gw.summarize_job_inference(job)
+    assert s == {"requests": 10, "ok": 2, "payment_required": 3, "unauthorized": 2,
+                 "bad_request": 1, "unreachable": 1, "other": 1}
+    # summarize deletes the file (one-shot per run)
+    assert gw.summarize_job_inference(job) == {"requests": 0, "ok": 0, "payment_required": 0,
+                 "unauthorized": 0, "bad_request": 0, "unreachable": 0, "other": 0}
+
+
+def test_job_inference_summary_rejects_bad_job_id(tmp_path, monkeypatch):
+    import room.inference_gateway as gw
+    monkeypatch.setattr(gw, "INFERENCE_STATUS_DIR", str(tmp_path))
+    assert gw.summarize_job_inference("../etc/passwd") == {"requests": 0}

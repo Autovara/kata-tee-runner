@@ -63,6 +63,61 @@ def _log_gateway(message: str) -> None:
     print(f"GATEWAY {message}", file=sys.stderr, flush=True)
 
 
+# Per-job inference outcomes are written here so the (separate-process) /run handler can attest a
+# per-run summary -- e.g. "every call returned 402" => the miner's provider key is out of credits.
+# ONLY the numeric provider status is written; never request/response content or the key.
+INFERENCE_STATUS_DIR = os.environ.get(
+    "KATA_INFERENCE_STATUS_DIR", "/tmp/kata-inference-status"
+)
+
+
+def _record_job_outcome(job_id: str, status: int) -> None:
+    try:
+        os.makedirs(INFERENCE_STATUS_DIR, exist_ok=True)
+        with open(os.path.join(INFERENCE_STATUS_DIR, job_id), "a", encoding="utf-8") as handle:
+            handle.write(f"{status}\n")  # O_APPEND: atomic per short line across gateway threads
+    except OSError:
+        pass  # observability must never break inference
+
+
+def summarize_job_inference(job_id: str) -> dict:
+    """Read and delete a job's recorded upstream statuses; return an attestable summary.
+
+    Buckets: ``ok`` (2xx), ``payment_required`` (402 = out of credits), ``unauthorized``
+    (401/403 = invalid/expired key), ``bad_request`` (400), ``unreachable`` (0), ``other``.
+    """
+    if not re.fullmatch(r"[0-9a-f]{16,64}", job_id or ""):
+        return {"requests": 0}
+    statuses: list[int] = []
+    path = os.path.join(INFERENCE_STATUS_DIR, job_id)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            statuses = [int(x) for x in handle.read().split() if x.lstrip("-").isdigit()]
+    except OSError:
+        pass
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    summary = {"requests": len(statuses), "ok": 0, "payment_required": 0,
+               "unauthorized": 0, "bad_request": 0, "unreachable": 0, "other": 0}
+    for status in statuses:
+        if 200 <= status < 300:
+            summary["ok"] += 1
+        elif status == 402:
+            summary["payment_required"] += 1
+        elif status in (401, 403):
+            summary["unauthorized"] += 1
+        elif status == 400:
+            summary["bad_request"] += 1
+        elif status == 0:
+            summary["unreachable"] += 1
+        else:
+            summary["other"] += 1
+    return summary
+
+
 _PROVIDER_PATTERN = re.compile(PROVIDER_ID_REGEX + r"\Z")
 _JOB_ROUTE_PATTERN = re.compile(
     r"/j/(?P<job_id>[0-9a-f]{16,64})~(?P<provider>" + PROVIDER_ID_REGEX + r")~"
@@ -253,7 +308,7 @@ def _route_payload(job_id: str, provider: str) -> bytes:
     return f"kata-inference-route-v1:{job_id}:{provider}".encode("ascii")
 
 
-def _provider_from_route(path: str) -> str:
+def _provider_from_route(path: str) -> tuple[str, str]:
     match = _JOB_ROUTE_PATTERN.fullmatch(path)
     if match is None or not auth.is_configured():
         raise GatewayAuthorizationError("a valid signed job inference route is required")
@@ -263,7 +318,7 @@ def _provider_from_route(path: str) -> str:
     expected = auth.sign(_route_payload(job_id, provider))
     if not hmac.compare_digest(signature, expected):
         raise GatewayAuthorizationError("a valid signed job inference route is required")
-    return provider
+    return job_id, provider
 
 
 class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
@@ -280,20 +335,21 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         try:
-            provider = _provider_from_route(parsed.path)
+            job_id, provider = _provider_from_route(parsed.path)
         except GatewayAuthorizationError as error:
             self._read_body()
             self._send_json(403, {"status": "error", "detail": str(error)})
             return
-        self._forward(provider)
+        self._forward(job_id, provider)
 
-    def _forward(self, provider: str) -> None:
+    def _forward(self, job_id: str, provider: str) -> None:
         req = next(_request_counter)
         _log_gateway(f"req#{req} provider={provider} received")
         body = self._read_body()
         api_key = self.headers.get("x-inference-api-key", "").strip()
         if not api_key:
             _log_gateway(f"req#{req} provider={provider} -> 401 no-miner-key")
+            _record_job_outcome(job_id, 401)
             self._send_json(
                 401,
                 {"status": "error", "detail": "A miner inference API key is required."},
@@ -311,6 +367,7 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
             )
         except GatewayConfigurationError as error:
             _log_gateway(f"req#{req} provider={provider} -> 502 provider-not-enabled")
+            _record_job_outcome(job_id, 502)
             self._send_json(502, {"status": "error", "detail": str(error)})
             return
         attempts = resolve_max_attempts()
@@ -321,6 +378,7 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
                         f"req#{req} provider={provider} -> upstream {response.status} "
                         f"(attempt {attempt})"
                     )
+                    _record_job_outcome(job_id, response.status)
                     self._relay_response(
                         response.status, response.headers.items(), response.read()
                     )
@@ -334,6 +392,7 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
                     time.sleep(_retry_backoff_seconds(attempt))
                     continue
                 _log_gateway(f"req#{req} provider={provider} -> upstream {error.code}")
+                _record_job_outcome(job_id, error.code)
                 self._relay_response(error.code, error.headers.items(), error.read())
                 return
             except URLError as error:
@@ -344,6 +403,7 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
                 _log_gateway(
                     f"req#{req} provider={provider} -> provider-unreachable ({error.reason})"
                 )
+                _record_job_outcome(job_id, 0)
                 self._send_json(
                     502,
                     {

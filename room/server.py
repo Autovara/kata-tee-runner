@@ -40,6 +40,7 @@ from room import auth, sealing
 from room.attest import bind_and_quote
 from room.bundle import credential_bundle_binding, extract_submission_bundle
 from room.dstack import get_client
+from room.inference_gateway import summarize_job_inference
 from room.inference_network import docker, ghcr_login
 from room.profile import TeeJobResult
 
@@ -196,6 +197,13 @@ def _run(raw: bytes):
         )
     if not isinstance(result, TeeJobResult):
         raise RuntimeError("TEE profile returned an invalid result; expected TeeJobResult")
+
+    # Attach a TRUSTED per-run inference summary (produced by the room's gateway, not the miner's
+    # agent) so the validator/dashboard can tell WHY a run found nothing -- e.g. all 402 => the
+    # miner's provider key is out of credits. It rides in the provenance, which is bound into the
+    # quote below, so it cannot be forged.
+    if isinstance(result.provenance, dict):
+        result.provenance["inference_summary"] = summarize_job_inference(nonce_hex)
 
     answer_hash, binding_hash, report_data, quote = bind_and_quote(
         result.report,
