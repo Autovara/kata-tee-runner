@@ -42,7 +42,11 @@ from room.bundle import credential_bundle_binding, extract_submission_bundle
 from room.dstack import get_client
 from room.inference_gateway import summarize_job_inference
 from room.inference_network import docker, ghcr_login
-from room.profile import TeeJobResult
+from room.profile import (
+    CREDENTIAL_VERSION_MULTI_KEY,
+    TeeJobResult,
+    credential_spec_for,
+)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = int(
@@ -66,6 +70,18 @@ def load_profile():
 
 
 PROFILE = load_profile()
+#: Validated once at start-up, so a profile that declares an incoherent credential contract fails
+#: when the room boots rather than on the first duel it is asked to judge.
+CREDENTIAL_SPEC = credential_spec_for(PROFILE)
+
+#: A credential fault is the contestant's own -- under a miner-funded policy it scores them zero --
+#: so the room must return *evidence* of it, not an HTTP error.  A bare 4xx could be produced by
+#: anything on the path, including a host that would rather one side lost; a quote-bound report
+#: cannot.  These are the reason codes that envelope carries.
+CREDENTIAL_FAILURE_STATUS = "credential_failure"
+CREDENTIAL_REASON_ABSENT = "absent"
+CREDENTIAL_REASON_UNREADABLE = "unreadable"
+CREDENTIAL_REASON_UNBOUND = "not_bound_to_bundle"
 
 
 @app.get("/health")
@@ -135,6 +151,43 @@ def run():
         return jsonify(error=str(exc), where=traceback.format_exc()[-1500:]), 500
 
 
+def _attested_credential_failure(
+    *, nonce: bytes, nonce_hex: str, project_key: str, bundle_sha256: str, reason: str, detail: str
+):
+    """A quote-bound report saying this contestant's credentials could not be used.
+
+    Deliberately the SAME response shape as a successful run -- report, provenance, hashes, quote --
+    so a validator verifies one path and cannot end up treating "no evidence" and "evidence of
+    failure" as the same thing.
+
+    ``detail`` is the parser's own message.  Those messages name a field and never a value by
+    construction, and a test holds them to it; the coarse ``reason`` is what callers should branch
+    on.
+    """
+    report = {"status": CREDENTIAL_FAILURE_STATUS, "reason": reason, "detail": detail}
+    provenance = {
+        "profile": "credential_failure",
+        "credential_profile": CREDENTIAL_SPEC.credential_profile,
+        "job_id": nonce_hex,
+        "inference_summary": summarize_job_inference(nonce_hex),
+    }
+    answer_hash, binding_hash, report_data, quote = bind_and_quote(
+        report, nonce, project_key, bundle_sha256=bundle_sha256, provenance=provenance
+    )
+    return jsonify(
+        nonce=nonce_hex,
+        project_key=project_key,
+        report=report,
+        bundle_sha256=bundle_sha256,
+        provenance=provenance,
+        answer_sha256=answer_hash.hex(),
+        binding_sha256=binding_hash.hex(),
+        report_data_sha256=report_data.hex(),
+        quote=quote.quote,
+        event_log=quote.event_log,
+    )
+
+
 def _run(raw: bytes):
     # Parse the SAME bytes the signature covered (Kata passes each candidate's sealed key per run).
     try:
@@ -165,12 +218,37 @@ def _run(raw: bytes):
     ):
         return jsonify(error="nonce already used"), 409
 
+    multi_key = CREDENTIAL_SPEC.version == CREDENTIAL_VERSION_MULTI_KEY
     try:
-        credential = sealing.resolve_miner_credential(sealed_key, required=False)
+        credential = sealing.resolve_sealed_credential(
+            sealed_key, spec=CREDENTIAL_SPEC, required=False
+        )
     except RuntimeError as exc:
+        # Under a miner-funded policy this zeroes the contestant, so it has to be attested. Under
+        # the single-key policy the lane funds inference, a credential fault is the operator's
+        # problem rather than a contestant's, and a plain 400 is the honest answer.
+        if multi_key:
+            return _attested_credential_failure(
+                nonce=nonce,
+                nonce_hex=nonce_hex,
+                project_key=project_key,
+                bundle_sha256=bundle_sha256,
+                reason=CREDENTIAL_REASON_UNREADABLE,
+                detail=str(exc),
+            )
         return jsonify(error=str(exc)), 400
     if credential is not None and not bundle_b64:
         return jsonify(error="a sealed miner credential requires a candidate bundle"), 400
+    if multi_key and credential is None and bundle_b64:
+        # A miner-funded run with nothing to fund it. Attested for the same reason as above.
+        return _attested_credential_failure(
+            nonce=nonce,
+            nonce_hex=nonce_hex,
+            project_key=project_key,
+            bundle_sha256=bundle_sha256,
+            reason=CREDENTIAL_REASON_ABSENT,
+            detail="this room requires a sealed miner credential set for every scored run",
+        )
 
     with tempfile.TemporaryDirectory() as directory:
         bundle_root: Path | None = None
@@ -189,6 +267,17 @@ def _run(raw: bytes):
             if credential is not None and not hmac.compare_digest(
                 credential.bundle_binding, actual_binding
             ):
+                if multi_key:
+                    return _attested_credential_failure(
+                        nonce=nonce,
+                        nonce_hex=nonce_hex,
+                        project_key=project_key,
+                        bundle_sha256=bundle_sha256,
+                        reason=CREDENTIAL_REASON_UNBOUND,
+                        detail=(
+                            "sealed miner credential is not bound to this candidate bundle"
+                        ),
+                    )
                 return (
                     jsonify(error="sealed miner credential is not bound to this candidate bundle"),
                     400,

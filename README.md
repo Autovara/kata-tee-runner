@@ -122,3 +122,48 @@ uv run --extra seal python kata_seal.py \
 
 It writes only encrypted ciphertext to `sealed_inference_key`. The miner adds that file to the PR;
 the owner and validator see ciphertext, not the key, provider descriptor, or bundle-binding payload.
+
+### Lanes that need several credentials
+
+Some lanes evaluate a submission against several independent providers — search, scraping,
+summarisation, judging — and the miner funds all of them. One key cannot express that, and a run
+that discovers the second provider is missing has already spent the miner's money on the first. So
+the whole set is sealed together, with `kata_seal_multi.py`:
+
+```bash
+uv run --extra seal python kata_seal_multi.py \
+  --room https://<approved-room> \
+  --credential-profile <profile-from-the-subnet-repo> \
+  --providers <p1>,<p2>,<p3> \
+  --key-env <p1>=<ENV_VAR> --key-env <p2>=<ENV_VAR> --key-env <p3>=<ENV_VAR> \
+  --bundle ./submission \
+  --measurement <approved-compose-hash>
+```
+
+The provider list, the credential profile and the measurement come from the subnet's own repository.
+Neither tool accepts a key as a command-line **value** — only the name of an environment variable, a
+0600 file, or a hidden prompt — because command lines are world-readable in the process list.
+
+The sealer refuses to write a partial set, and writes the ciphertext atomically at 0600.
+
+## How a profile declares its credential contract
+
+The base image contains no subnet's provider list; a profile declares its own, and the room enforces
+exactly what it declares. Omit these attributes and the profile gets the single-key contract above,
+which is what every profile predating multi-key sealing used.
+
+```python
+class MyProfile:
+    credential_version = 2
+    required_providers = ("provider-a", "provider-b")
+    credential_profile = "my-lane-funding-policy-v1"
+```
+
+Dispatch is on what the **profile** declares, never on what a payload claims, so a single-key room
+will not spend a multi-key payload and a multi-key room will not accept a single key.
+
+Under a multi-key contract the room answers a credential fault with a **quote-bound
+`credential_failure` report** rather than an HTTP error. Where a miner funds their own evaluation, a
+credential fault scores them zero — and a bare 4xx is not evidence, since anything on the path could
+have produced it. Under the single-key contract the lane funds inference, a credential fault is the
+operator's problem rather than a contestant's, and a plain 400 is the honest answer.
