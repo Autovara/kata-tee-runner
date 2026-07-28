@@ -209,3 +209,100 @@ def inference_gateway_url(job_id: str, provider: str) -> str:
     """
     route = make_job_route_token(job_id, provider)
     return f"http://{INFERENCE_GATEWAY_ALIAS}:{INFERENCE_GATEWAY_PORT}/j/{route}"
+
+
+# ---- the trusted broker -------------------------------------------------------------------------
+#
+# The gateway above runs as a SUBPROCESS, which is exactly why it cannot be the broker: a subprocess
+# has no way to reach the decrypted keys in the /run handler's memory, so the key has to travel to
+# whoever makes the call -- and for the gateway that is the agent. The broker instead runs on a
+# thread inside the runner process, holds the keys itself, and hands the agent a capability.
+
+BROKER_PORT = "8100"
+_broker_server = None
+_broker_thread = None
+_broker_network_ready = False
+
+
+def start_broker_once(broker):
+    """Serve ``broker`` on the sealed network, in this process. Idempotent."""
+    global _broker_server, _broker_thread
+    if _broker_server is not None:
+        return _broker_server
+    import threading
+
+    from room.broker import build_broker_server
+
+    _broker_server = build_broker_server(broker, "0.0.0.0", int(BROKER_PORT))
+    _broker_thread = threading.Thread(
+        target=_broker_server.serve_forever, daemon=True, name="kata-broker"
+    )
+    _broker_thread.start()
+    return _broker_server
+
+
+def stop_broker():
+    """Shut the broker's listener down. Used at batch completion and by tests."""
+    global _broker_server, _broker_thread, _broker_network_ready
+    if _broker_server is not None:
+        _broker_server.shutdown()
+        _broker_server.server_close()
+        _broker_server = None
+    if _broker_thread is not None:
+        _broker_thread.join(timeout=10)
+        _broker_thread = None
+    _broker_network_ready = False
+
+
+def broker_url() -> str:
+    """The base URL an agent is given. A host and a port -- the agent appends nothing but an
+    operation NAME, and the broker refuses any name it does not recognise."""
+    return f"http://{INFERENCE_GATEWAY_ALIAS}:{BROKER_PORT}"
+
+
+def _verify_broker_reachable() -> None:
+    """Fail closed unless a throwaway container on the sealed network can reach the broker.
+
+    Same reasoning as the gateway probe: without it, a stale network endpoint makes every agent call
+    fail at connect, the room returns an empty report, and the contestant is scored zero for the
+    room's own misconfiguration. Refuse the run instead.
+    """
+    own_container = socket.gethostname()
+    inspect = docker(["inspect", "-f", "{{.Image}}", own_container])
+    image = inspect.stdout.strip() if inspect.returncode == 0 else ""
+    if not image:
+        raise RuntimeError(
+            "could not resolve the runner image to self-test broker reachability: "
+            f"{(inspect.stderr or '').strip()[:200]}"
+        )
+    url = f"{broker_url()}/healthz"
+    probe = docker(
+        [
+            "run", "--rm", "--network", INF_NET, "--entrypoint", "python", image, "-c",
+            "import urllib.request,sys;"
+            f"sys.exit(0 if urllib.request.urlopen({url!r}, timeout=10).status == 200 else 1)",
+        ],
+        timeout=90,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "the trusted broker is NOT reachable on the sealed network via alias "
+            f"{INFERENCE_GATEWAY_ALIAS!r}: {(probe.stderr or probe.stdout or '').strip()[:300]}. "
+            "Refusing to run an agent whose calls would silently fail and score it 0."
+        )
+
+
+def ensure_broker_network_once(broker):
+    """An egress-blocked network on which an agent can reach the broker and nothing else.
+
+    Fails closed on both counts: the network must be internal (so a compromised agent has no path
+    off it), and the broker must be provably reachable on it (so a silent zero is impossible).
+    """
+    global _broker_network_ready
+    server = start_broker_once(broker)
+    if _broker_network_ready:
+        return server
+    _reset_inference_network()
+    _verify_broker_reachable()
+    _broker_network_ready = True
+    return server

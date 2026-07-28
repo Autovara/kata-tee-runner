@@ -144,3 +144,63 @@ def test_unresolvable_runner_image_cannot_self_test(monkeypatch):
     with pytest.raises(RuntimeError, match="could not resolve the runner image"):
         inf.ensure_inference_network_once()
     assert inf._inference_network_ready is False
+
+
+# ---- the same guarantees for the trusted broker ---
+#
+# The broker replaces the gateway for miner-funded lanes and the failure modes are identical: a
+# non-internal network lets a compromised agent egress, and an unreachable broker makes every call
+# fail at connect -- which used to look like "the contestant found nothing" and score it zero.
+
+
+def _fake_broker():
+    from room.broker import Broker
+
+    return Broker([])
+
+
+def test_broker_network_is_rejected_when_not_internal(monkeypatch):
+    """The agent no longer carries a key, but it does carry a capability and whatever it scraped.
+    A network that can reach the internet is still an exfiltration path."""
+    _install_fake_docker(monkeypatch, _healthy_responder(internal="false"))
+    monkeypatch.setattr(inf, "_broker_network_ready", False)
+    monkeypatch.setattr(inf, "start_broker_once", lambda _broker: None)
+
+    with pytest.raises(RuntimeError, match="not internal"):
+        inf.ensure_broker_network_once(_fake_broker())
+
+
+def test_an_unreachable_broker_fails_closed(monkeypatch):
+    """Refusing the run beats returning an empty report: an empty report is scored, and the
+    contestant is scored zero for the room's own misconfiguration."""
+    _install_fake_docker(monkeypatch, _healthy_responder(probe_rc=1))
+    monkeypatch.setattr(inf, "_broker_network_ready", False)
+    monkeypatch.setattr(inf, "start_broker_once", lambda _broker: None)
+
+    with pytest.raises(RuntimeError, match="broker is NOT reachable"):
+        inf.ensure_broker_network_once(_fake_broker())
+
+
+def test_a_healthy_broker_network_is_prepared_once(monkeypatch):
+    calls = _install_fake_docker(monkeypatch, _healthy_responder())
+    monkeypatch.setattr(inf, "_broker_network_ready", False)
+    monkeypatch.setattr(inf, "start_broker_once", lambda _broker: None)
+
+    broker = _fake_broker()
+    inf.ensure_broker_network_once(broker)
+    prepared = len(calls)
+    inf.ensure_broker_network_once(broker)
+
+    assert len(calls) == prepared, "the network was prepared twice"
+
+
+def test_the_broker_url_names_a_host_and_a_port_and_nothing_else():
+    """The agent appends only an operation NAME to this. If it carried a path the agent could
+    manipulate, the broker's operation allowlist would be one string-join away from irrelevant."""
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(inf.broker_url())
+    assert parsed.scheme == "http"          # inside the sealed network; there is no CA in a room
+    assert parsed.netloc == f"{inf.INFERENCE_GATEWAY_ALIAS}:{inf.BROKER_PORT}"
+    assert parsed.path == ""
+    assert not parsed.query and not parsed.fragment

@@ -167,3 +167,52 @@ Under a multi-key contract the room answers a credential fault with a **quote-bo
 credential fault scores them zero — and a bare 4xx is not evidence, since anything on the path could
 have produced it. Under the single-key contract the lane funds inference, a credential fault is the
 operator's problem rather than a contestant's, and a plain 400 is the honest answer.
+
+## The trusted broker (multi-key lanes)
+
+The gateway above forwards one request to one allowlisted route, and **the agent supplies the key**.
+That is coherent when the agent legitimately holds its own credential, but it means a real credential
+sits in the environment of code written by a stranger — `os.environ`, `/proc/self/environ`, `argv`, a
+crash dump, a provider error body relayed verbatim.
+
+For a lane where the miner funds several providers, the broker inverts that. **The decrypted keys
+stay in the runner's memory and are never handed out.** The agent gets a *capability*: an unguessable,
+short-lived token bound to one job and one role. It asks for a named operation; the broker injects the
+right key server-side, calls a fixed route, and returns provider data.
+
+```text
+POST /v1/op/<name>     x-kata-capability: kcap_...
+GET  /v1/quota         x-kata-capability: kcap_...
+```
+
+The broker runs **in-process on a thread**, not as a subprocess. That is forced by the design: a
+subprocess cannot reach the `/run` handler's decrypted credentials without being handed them, which
+is the thing being removed.
+
+A profile declares its operations; the base knows no provider names:
+
+```python
+from room.broker import Broker, OperationSpec, ROLE_AGENT, ROLE_EVALUATOR
+
+Broker([
+    OperationSpec(name="web-search", role=ROLE_AGENT, provider="alpha",
+                  handler=my_search, max_calls=64),
+    OperationSpec(name="judge", role=ROLE_EVALUATOR, provider="delta",
+                  handler=my_judge, max_calls=512, http_exposed=False),
+])
+```
+
+What the broker guarantees, and what it does not:
+
+- **An agent capability cannot invoke an evaluator operation.** Enforced twice — by role comparison,
+  and by evaluator operations not being on the HTTP surface at all. An agent that could reach the
+  judge could grade its own work.
+- **The credential comes from the operation, never from the payload.** There is no field an agent can
+  set to spend a different key, reach a different host, or name a different model.
+- **Quotas are the broker's count, not the agent's self-report**, per capability and per operation.
+- **Every refusal is byte-identical.** Unknown operation, wrong role, exhausted quota, expired or
+  forged token: a caller that could tell them apart could map the room's state one probe at a time.
+- **A job's capabilities die with it**, and its keys are overwritten before being dropped — a core
+  dump taken afterwards should not still contain that contestant's credentials.
+- **It cannot stop a handler that deliberately returns the key.** What it does is make the reviewed
+  operation table the only place a handler ever sees one, instead of every agent ever submitted.
