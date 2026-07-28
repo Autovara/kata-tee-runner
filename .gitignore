@@ -3,5 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+.env
+.env.*
+!.env.example
 # relay.py is a vendored generic relay (see §6 of ../KATA-TEE-RUNNER-PLAN.md); provided at build.
 relay.py

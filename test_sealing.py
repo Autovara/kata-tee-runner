@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -85,6 +86,7 @@ def test_credential_binding_includes_submission_metadata(tmp_path: Path) -> None
 
 
 def test_kata_seal_rejects_a_blank_api_key_before_contacting_the_room(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "   ")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -94,12 +96,126 @@ def test_kata_seal_rejects_a_blank_api_key_before_contacting_the_room(monkeypatc
             "https://room.example",
             "--provider",
             "akashml",
-            "--key",
-            "   ",
+            "--key-env",
+            "TEST_PROVIDER_KEY",
             "--bundle",
             "./submission",
         ],
     )
 
-    with pytest.raises(SystemExit, match="--key must not be empty"):
+    with pytest.raises(SystemExit, match="must not be empty"):
         kata_seal.main()
+
+
+def test_kata_seal_requires_an_approved_measurement_before_contacting_room(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "miner-key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kata_seal.py",
+            "--room",
+            "https://room.example",
+            "--provider",
+            "akashml",
+            "--key-env",
+            "TEST_PROVIDER_KEY",
+            "--bundle",
+            "./submission",
+        ],
+    )
+    monkeypatch.setattr(
+        kata_seal,
+        "fetch_pubkey",
+        lambda _room: pytest.fail("must reject before contacting the room"),
+    )
+
+    with pytest.raises(SystemExit, match="--measurement"):
+        kata_seal.main()
+
+
+@pytest.mark.parametrize(
+    "room",
+    [
+        "https://:password@room.example",
+        "https://room.example?redirect=https://evil.example",
+        "https://room.example#fragment",
+    ],
+)
+def test_kata_seal_rejects_ambiguous_room_urls(room: str) -> None:
+    with pytest.raises(SystemExit, match="without embedded credentials"):
+        kata_seal.fetch_pubkey(room)
+
+
+def test_kata_seal_http_client_refuses_redirects() -> None:
+    assert (
+        kata_seal._RejectRedirects().redirect_request(
+            None, None, 307, "redirect", {}, "https://evil.example"
+        )
+        is None
+    )
+
+
+def test_kata_seal_key_file_must_be_private_and_regular(
+    monkeypatch, tmp_path: Path
+) -> None:
+    exposed = tmp_path / "provider-key"
+    exposed.write_text("miner-key\n", encoding="utf-8")
+    exposed.chmod(0o644)
+    with pytest.raises(SystemExit, match="group/other"):
+        kata_seal.load_api_key(key_env="", key_file=str(exposed))
+
+    exposed.chmod(0o600)
+    assert kata_seal.load_api_key(key_env="", key_file=str(exposed)) == "miner-key"
+
+
+def test_kata_seal_quote_must_bind_the_published_key(monkeypatch) -> None:
+    pubkey = "02" + "11" * 32
+    report = SimpleNamespace(mr_config_id=b"\x01" + b"\xaa" * 32, report_data=b"\x00" * 64)
+    parsed = SimpleNamespace(report=report, is_tdx=lambda: True)
+
+    async def collateral(_url, _raw):
+        return object()
+
+    fake_qvl = SimpleNamespace(
+        PHALA_PCCS_URL="https://pccs.example",
+        parse_quote=lambda _raw: parsed,
+        get_collateral=collateral,
+        verify=lambda _raw, _collateral, _now: SimpleNamespace(status="OK"),
+    )
+    monkeypatch.setitem(sys.modules, "dcap_qvl", fake_qvl)
+
+    with pytest.raises(SystemExit, match="does not bind"):
+        kata_seal.verify_room("00", pubkey, "aa" * 32)
+
+
+def test_kata_seal_accepts_only_a_bound_approved_current_tdx_quote(monkeypatch) -> None:
+    pubkey = "02" + "11" * 32
+    binding = kata_seal.hashlib.sha256(
+        b"kata-sealing-pubkey:" + bytes.fromhex(pubkey)
+    ).digest()
+    report = SimpleNamespace(
+        mr_config_id=b"\x01" + b"\xaa" * 32,
+        report_data=binding + b"\x00" * 32,
+    )
+    parsed = SimpleNamespace(report=report, is_tdx=lambda: True)
+
+    async def collateral(_url, _raw):
+        return object()
+
+    fake_qvl = SimpleNamespace(
+        PHALA_PCCS_URL="https://pccs.example",
+        parse_quote=lambda _raw: parsed,
+        get_collateral=collateral,
+        verify=lambda _raw, _collateral, _now: SimpleNamespace(
+            status="SW_HARDENING_NEEDED"
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "dcap_qvl", fake_qvl)
+
+    assert kata_seal.verify_room("00", pubkey, "aa" * 32) == (
+        "aa" * 32,
+        "SW_HARDENING_NEEDED",
+    )

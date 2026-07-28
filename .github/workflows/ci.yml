@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Verify the Docker requirements match uv.lock
+        run: |
+          diff -u \
+            <(tail -n +3 requirements.lock) \
+            <(uv export --locked --no-dev --no-hashes --no-emit-project \
+              --no-annotate --no-header)
+      - run: uv run --group dev ruff check room test_*.py kata_seal.py
+      - run: uv run --group dev pytest -q

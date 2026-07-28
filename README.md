@@ -112,10 +112,10 @@ room URL, measurement, and the providers you may use from the subnet's repo (for
 [kata-sn60](https://github.com/Autovara/kata-sn60)):
 
 ```bash
-python kata_seal.py \
+uv run --extra seal python kata_seal.py \
   --room https://<approved-room> \
   --provider <provider-id> \
-  --key <miner-provider-key> \
+  --key-env <environment-variable-containing-miner-provider-key> \
   --bundle ./submission \
   --measurement <approved-compose-hash>
 ```

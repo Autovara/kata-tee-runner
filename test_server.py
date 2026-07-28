@@ -14,6 +14,7 @@ from tarfile import TarFile
 
 from room import auth
 from room.attest import bind_and_quote, binding_payload, canonical
+from room.bundle import credential_bundle_binding
 from room.profile import MinerInferenceCredential
 from room.server import PROFILE, app
 
@@ -45,6 +46,16 @@ def _bundle_b64(files: dict[str, str]) -> str:
             info.size = len(data)
             archive.addfile(info, BytesIO(data))
     return b64encode(buffer.getvalue()).decode()
+
+
+def _bundle_binding(tmp_path: Path, files: dict[str, str]) -> str:
+    root = tmp_path / "binding"
+    root.mkdir()
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    return credential_bundle_binding(root)
 
 
 def test_profile_is_loaded_generically_from_env():
@@ -138,7 +149,6 @@ def test_pull_test_is_disabled_by_default():
 
 def test_run_binds_a_decrypted_credential_to_the_exact_agent_bundle(monkeypatch, tmp_path: Path):
     from room import server
-    from room.bundle import credential_bundle_binding
 
     bundle_root = tmp_path / "bundle"
     bundle_root.mkdir()
@@ -150,7 +160,8 @@ def test_run_binds_a_decrypted_credential_to_the_exact_agent_bundle(monkeypatch,
         bundle_binding=binding,
     )
     monkeypatch.setattr(server.sealing, "resolve_miner_credential", lambda *_a, **_k: credential)
-    bundle = _bundle_b64({"agent.py": "def agent_main(): pass\n"})
+    files = {"agent.py": "def agent_main(): pass\n"}
+    bundle = _bundle_b64(files)
 
     response = _post_run(
         {
@@ -158,6 +169,7 @@ def test_run_binds_a_decrypted_credential_to_the_exact_agent_bundle(monkeypatch,
             "project_key": "proj-x",
             "sealed_key": "ciphertext-visible-to-validator-only",
             "bundle": bundle,
+            "bundle_sha256": binding,
         }
     )
 
@@ -168,7 +180,6 @@ def test_run_binds_a_decrypted_credential_to_the_exact_agent_bundle(monkeypatch,
 
 def test_run_rejects_credential_replayed_with_a_substituted_agent(monkeypatch, tmp_path: Path):
     from room import server
-    from room.bundle import credential_bundle_binding
 
     original = tmp_path / "original"
     original.mkdir()
@@ -179,7 +190,8 @@ def test_run_rejects_credential_replayed_with_a_substituted_agent(monkeypatch, t
         bundle_binding=credential_bundle_binding(original),
     )
     monkeypatch.setattr(server.sealing, "resolve_miner_credential", lambda *_a, **_k: credential)
-    substituted_bundle = _bundle_b64({"agent.py": "malicious exfiltration agent\n"})
+    files = {"agent.py": "malicious exfiltration agent\n"}
+    substituted_bundle = _bundle_b64(files)
 
     response = _post_run(
         {
@@ -187,11 +199,28 @@ def test_run_rejects_credential_replayed_with_a_substituted_agent(monkeypatch, t
             "project_key": "proj-x",
             "sealed_key": "public-ciphertext",
             "bundle": substituted_bundle,
+            "bundle_sha256": _bundle_binding(tmp_path, files),
         }
     )
 
     assert response.status_code == 400
     assert "not bound to this candidate bundle" in response.get_json()["error"]
+
+
+def test_run_rejects_a_digest_that_does_not_match_the_executed_bundle(tmp_path: Path):
+    files = {"agent.py": "def agent_main(): return {'ok': True}\n"}
+    response = _post_run(
+        {
+            "nonce": "bc" * 16,
+            "project_key": "proj-x",
+            "bundle": _bundle_b64(files),
+            "bundle_sha256": "ab" * 32,
+        }
+    )
+
+    assert _bundle_binding(tmp_path, files) != "ab" * 32
+    assert response.status_code == 400
+    assert "does not match the submitted candidate bundle" in response.get_json()["error"]
 
 
 def test_run_rejects_unsigned_request():

@@ -301,16 +301,32 @@ def test_job_inference_summary_buckets_statuses(tmp_path, monkeypatch):
     monkeypatch.setattr(gw, "INFERENCE_STATUS_DIR", str(tmp_path))
     job = "a" * 24
     for st in (200, 200, 402, 402, 402, 401, 403, 400, 0, 500):
-        gw._record_job_outcome(job, st)
+        gw._record_job_outcome(job, st, tokens=7 if st == 200 else 0)
     s = gw.summarize_job_inference(job)
-    assert s == {"requests": 10, "ok": 2, "payment_required": 3, "unauthorized": 2,
-                 "bad_request": 1, "unreachable": 1, "other": 1}
+    assert s == {"requests": 10, "tokens": 14, "ok": 2, "payment_required": 3,
+                 "unauthorized": 2, "bad_request": 1, "unreachable": 1, "other": 1}
     # summarize deletes the file (one-shot per run)
-    assert gw.summarize_job_inference(job) == {"requests": 0, "ok": 0, "payment_required": 0,
-                 "unauthorized": 0, "bad_request": 0, "unreachable": 0, "other": 0}
+    assert gw.summarize_job_inference(job) == {
+        "requests": 0, "tokens": 0, "ok": 0, "payment_required": 0,
+        "unauthorized": 0, "bad_request": 0, "unreachable": 0, "other": 0,
+    }
 
 
 def test_job_inference_summary_rejects_bad_job_id(tmp_path, monkeypatch):
     import room.inference_gateway as gw
     monkeypatch.setattr(gw, "INFERENCE_STATUS_DIR", str(tmp_path))
     assert gw.summarize_job_inference("../etc/passwd") == {"requests": 0}
+
+
+def test_extracts_only_valid_provider_reported_token_counters():
+    import room.inference_gateway as gw
+
+    assert gw._extract_reported_tokens(b'{"usage":{"total_tokens":123}}') == 123
+    assert gw._extract_reported_tokens(
+        b'{"usage":{"input_tokens":40,"output_tokens":2}}'
+    ) == 42
+    assert gw._extract_reported_tokens(
+        b'{"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4}}'
+    ) == 7
+    assert gw._extract_reported_tokens(b'{"usage":{"total_tokens":-1}}') == 0
+    assert gw._extract_reported_tokens(b"not-json") == 0

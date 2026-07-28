@@ -181,6 +181,11 @@ def _run(raw: bytes):
                 actual_binding = credential_bundle_binding(bundle_root)
             except RuntimeError as exc:
                 return jsonify(error=str(exc)), 400
+            if not hmac.compare_digest(bundle_sha256, actual_binding):
+                return (
+                    jsonify(error="bundle_sha256 does not match the submitted candidate bundle"),
+                    400,
+                )
             if credential is not None and not hmac.compare_digest(
                 credential.bundle_binding, actual_binding
             ):

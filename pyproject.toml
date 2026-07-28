@@ -4,11 +4,15 @@ version = "0.1.0"
 description = "Subnet-neutral confidential TEE runner for miner-funded agents."
 requires-python = ">=3.12"
 dependencies = [
-  "coincurve",
-  "dstack-sdk",
-  "eciespy",
-  "flask>=3.0",
+  "coincurve==21.0.0",
+  "dstack-sdk==0.5.4",
+  "eciespy==0.4.6",
+  "flask==3.1.3",
+  "gunicorn==23.0.0",
 ]
+
+[project.optional-dependencies]
+seal = ["dcap-qvl==0.5.3"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]

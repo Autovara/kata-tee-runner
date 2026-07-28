@@ -7,9 +7,10 @@ credential descriptor, so an agent cannot select a different provider or an
 arbitrary destination.
 
 Provider routes are deployment configuration, not miner input.  The gateway is
-subnet-neutral: it does not select models, meter tokens, limit calls, or pay
-for inference; it only sends an unchanged request to an allowlisted route with
-the miner's own credential.
+subnet-neutral: it does not select models, limit calls, or pay for inference;
+it only sends an unchanged request to an allowlisted route with the miner's own
+credential.  When a provider reports token usage, the gateway includes that
+counter in the room's attestable per-job summary.
 """
 
 from __future__ import annotations
@@ -71,11 +72,12 @@ INFERENCE_STATUS_DIR = os.environ.get(
 )
 
 
-def _record_job_outcome(job_id: str, status: int) -> None:
+def _record_job_outcome(job_id: str, status: int, tokens: int = 0) -> None:
     try:
         os.makedirs(INFERENCE_STATUS_DIR, exist_ok=True)
         with open(os.path.join(INFERENCE_STATUS_DIR, job_id), "a", encoding="utf-8") as handle:
-            handle.write(f"{status}\n")  # O_APPEND: atomic per short line across gateway threads
+            # O_APPEND makes each short line atomic across gateway threads.
+            handle.write(f"{status} {max(0, tokens)}\n")
     except OSError:
         pass  # observability must never break inference
 
@@ -88,11 +90,17 @@ def summarize_job_inference(job_id: str) -> dict:
     """
     if not re.fullmatch(r"[0-9a-f]{16,64}", job_id or ""):
         return {"requests": 0}
-    statuses: list[int] = []
+    outcomes: list[tuple[int, int]] = []
     path = os.path.join(INFERENCE_STATUS_DIR, job_id)
     try:
         with open(path, encoding="utf-8") as handle:
-            statuses = [int(x) for x in handle.read().split() if x.lstrip("-").isdigit()]
+            for line in handle:
+                fields = line.split()
+                if not fields or not fields[0].lstrip("-").isdigit():
+                    continue
+                status = int(fields[0])
+                tokens = int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 0
+                outcomes.append((status, tokens))
     except OSError:
         pass
     finally:
@@ -100,9 +108,10 @@ def summarize_job_inference(job_id: str) -> dict:
             os.remove(path)
         except OSError:
             pass
-    summary = {"requests": len(statuses), "ok": 0, "payment_required": 0,
-               "unauthorized": 0, "bad_request": 0, "unreachable": 0, "other": 0}
-    for status in statuses:
+    summary = {"requests": len(outcomes), "tokens": sum(tokens for _, tokens in outcomes),
+               "ok": 0, "payment_required": 0, "unauthorized": 0,
+               "bad_request": 0, "unreachable": 0, "other": 0}
+    for status, _tokens in outcomes:
         if 200 <= status < 300:
             summary["ok"] += 1
         elif status == 402:
@@ -288,6 +297,43 @@ def _retry_backoff_seconds(attempt: int) -> float:
     return delay + random.uniform(0.0, delay * 0.25)
 
 
+def _extract_reported_tokens(body: bytes) -> int:
+    """Return a provider-reported total without estimating or inspecting prompts."""
+
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        usage = payload.get("usageMetadata")
+    if not isinstance(usage, dict):
+        return 0
+
+    def counter(name: str) -> int | None:
+        value = usage.get(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if 0 <= value <= 1_000_000_000 else None
+
+    for name in ("total_tokens", "totalTokens", "totalTokenCount"):
+        reported = counter(name)
+        if reported is not None:
+            return reported
+    for left, right in (
+        ("input_tokens", "output_tokens"),
+        ("prompt_tokens", "completion_tokens"),
+        ("promptTokenCount", "candidatesTokenCount"),
+    ):
+        input_count = counter(left)
+        output_count = counter(right)
+        if input_count is not None and output_count is not None:
+            return min(1_000_000_000, input_count + output_count)
+    return 0
+
+
 def make_job_route_token(job_id: str, provider: str) -> str:
     """Make the provider-bound route token passed to an untrusted agent.
 
@@ -374,13 +420,18 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
         for attempt in range(1, attempts + 1):
             try:
                 with urlopen(request, timeout=resolve_timeout()) as response:
+                    response_body = response.read()
                     _log_gateway(
                         f"req#{req} provider={provider} -> upstream {response.status} "
                         f"(attempt {attempt})"
                     )
-                    _record_job_outcome(job_id, response.status)
+                    _record_job_outcome(
+                        job_id,
+                        response.status,
+                        _extract_reported_tokens(response_body),
+                    )
                     self._relay_response(
-                        response.status, response.headers.items(), response.read()
+                        response.status, response.headers.items(), response_body
                     )
                 return
             except HTTPError as error:

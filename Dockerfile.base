@@ -10,16 +10,18 @@
 ARG PYTHON_BASE=python@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 FROM ${PYTHON_BASE}
 # The docker CLI (static binary) so the room can pull + run the problem image inside the room.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
-    && curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz -o /tmp/d.tgz \
-    && tar -xzf /tmp/d.tgz -C /usr/local/bin --strip-components=1 docker/docker \
-    && rm /tmp/d.tgz \
-    && rm -rf /var/lib/apt/lists/* \
+ADD --checksum=sha256:d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74 \
+    https://download.docker.com/linux/static/stable/x86_64/docker-29.6.2.tgz /tmp/docker.tgz
+RUN python -c "import tarfile; archive=tarfile.open('/tmp/docker.tgz'); member=archive.getmember('docker/docker'); member.name='docker'; archive.extract(member, '/usr/local/bin', filter='data')" \
+    && chmod 0755 /usr/local/bin/docker \
+    && rm /tmp/docker.tgz \
     && docker --version
 WORKDIR /app
 COPY pyproject.toml .
+COPY requirements.lock .
 COPY room/ ./room/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --requirement requirements.lock
 EXPOSE 8080
-CMD ["python", "-m", "room.server"]
+# One worker is deliberate: the in-memory replay guard is then process-wide, while threads allow
+# health checks during a long room job. The timeout exceeds the signed request's maximum lifetime.
+CMD ["gunicorn", "--bind=0.0.0.0:8080", "--workers=1", "--threads=8", "--timeout=1200", "--graceful-timeout=30", "--access-logfile=-", "room.server:app"]
