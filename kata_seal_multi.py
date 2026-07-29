@@ -37,13 +37,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
-import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
-from kata_seal import fetch_pubkey, load_api_key, verify_room
+from kata_seal import fetch_pubkey, load_api_key, verify_room, write_atomically
 from room.bundle import SEALED_CREDENTIAL_FILENAME, credential_bundle_binding
 from room.ids import PROVIDER_ID_REGEX
 from room.sealing import MAX_KEY_CHARS, MIN_KEY_CHARS
@@ -121,32 +119,6 @@ def collect_keys(
             raise SystemExit(f"ERROR: the key for {provider} contains a control character.")
         keys[provider] = value
     return keys
-
-
-def write_atomically(path: Path, text: str) -> None:
-    """Write 0600, atomically, or leave the previous file untouched.
-
-    A half-written ciphertext is worse than none: it looks like a submitted credential, and the
-    miner finds out it was truncated when their duel comes back zeroed.  The temporary file is
-    created in the destination directory so the replace is a rename within one filesystem.
-    """
-    directory = path.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(dir=str(directory), prefix=".kata-seal-")
-    try:
-        os.fchmod(handle, 0o600)
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        # Never leave the plaintext-adjacent temporary behind on any failure, including Ctrl-C.
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
 
 
 def build_parser() -> argparse.ArgumentParser:

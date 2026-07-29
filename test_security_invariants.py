@@ -120,3 +120,50 @@ def test_the_diagnostic_endpoint_still_demands_auth_when_enabled(monkeypatch):
     monkeypatch.delenv(auth.AUTH_SECRET_ENV, raising=False)
     response = server.app.test_client().post("/pull-test", json={})
     assert response.status_code == 503
+
+
+# ---- INVARIANT: a sealed credential is written atomically, at 0600, by BOTH CLIs ---
+#
+# `kata_seal.py` used a plain `open(...).write()`. Two consequences, both silent:
+#
+#   * an interrupted seal left a TRUNCATED credential, which fails later on a scored duel rather
+#     than at the moment the miner sealed it;
+#   * the file took the caller's umask instead of 0600.
+#
+# `kata_seal_multi.py` already did it correctly. The two tools now share one writer, so the
+# behaviour cannot diverge again -- which is the point of sharing it rather than copying the fix.
+
+def test_both_sealing_tools_use_the_same_writer():
+    import kata_seal
+    import kata_seal_multi
+
+    assert kata_seal_multi.write_atomically is kata_seal.write_atomically
+
+
+def test_a_sealed_credential_is_written_owner_only(tmp_path):
+    import stat
+
+    import kata_seal
+
+    target = tmp_path / "sealed_inference_key"
+    kata_seal.write_atomically(target, "deadbeef")
+    mode = stat.S_IMODE(target.stat().st_mode)
+    assert mode == 0o600, f"sealed credential is {oct(mode)}, expected 0o600"
+
+
+def test_a_failed_seal_leaves_the_previous_credential_intact(tmp_path, monkeypatch):
+    """A miner re-sealing after editing their agent must not lose the working credential to a
+    half-written replacement."""
+    import kata_seal
+
+    target = tmp_path / "sealed_inference_key"
+    target.write_text("previous", encoding="utf-8")
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(kata_seal.os, "replace", _boom)
+    with pytest.raises(OSError):
+        kata_seal.write_atomically(target, "replacement")
+    assert target.read_text(encoding="utf-8") == "previous"
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".kata-seal-")]

@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -150,6 +151,32 @@ def load_api_key(*, key_env: str, key_file: str) -> str:
     return value.strip()
 
 
+def write_atomically(path: Path, text: str) -> None:
+    """Write 0600, atomically, or leave the previous file untouched.
+
+    A half-written ciphertext is worse than none: it looks like a submitted credential, and the
+    miner finds out it was truncated when their duel comes back zeroed.  The temporary file is
+    created in the destination directory so the replace is a rename within one filesystem.
+    """
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=str(directory), prefix=".kata-seal-")
+    try:
+        os.fchmod(handle, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        # Never leave the plaintext-adjacent temporary behind on any failure, including Ctrl-C.
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Seal your provider credential to a Kata room.")
     ap.add_argument(
@@ -244,8 +271,7 @@ def main() -> None:
         if args.out
         else Path(args.bundle).expanduser().resolve() / "sealed_inference_key"
     )
-    with open(output, "w", encoding="utf-8") as f:
-        f.write(sealed)
+    write_atomically(output, sealed)
     print(f"sealed credential -> {output} ({len(sealed)} hex chars). Add this file to your PR.")
 
 

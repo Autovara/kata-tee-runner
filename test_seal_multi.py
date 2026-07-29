@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+import kata_seal
 import kata_seal_multi as sealer
 
 PROVIDERS = ("alpha", "beta", "gamma", "delta")
@@ -162,7 +163,7 @@ def test_a_failed_write_leaves_the_previous_file_intact(monkeypatch, tmp_path: P
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(sealer.os, "replace", _boom)
+    monkeypatch.setattr(kata_seal.os, "replace", _boom)
     with pytest.raises(OSError, match="disk full"):
         sealer.write_atomically(target, "new-ciphertext")
 
@@ -178,7 +179,7 @@ def test_an_interrupted_write_also_cleans_up(monkeypatch, tmp_path: Path) -> Non
     def _boom(*_args, **_kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(sealer.os, "replace", _boom)
+    monkeypatch.setattr(kata_seal.os, "replace", _boom)
     with pytest.raises(KeyboardInterrupt):
         sealer.write_atomically(target, "new-ciphertext")
     assert not list(tmp_path.iterdir())
