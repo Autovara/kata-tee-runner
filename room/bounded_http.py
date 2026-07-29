@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Type
 
@@ -50,7 +51,43 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         self.max_connections = max_connections
         self.connection_timeout_seconds = connection_timeout_seconds
         self._connection_slots = threading.BoundedSemaphore(max_connections)
+        # Observability only: nothing in the serving path branches on these. They exist because a
+        # slot becoming free is otherwise UNOBSERVABLE from outside.
+        #
+        # A client cannot detect it: the socket is closed inside `process_request_thread`, and the
+        # slot is released in that method's `finally`, strictly afterwards. So a peer that sees its
+        # connection close and immediately reconnects can still be refused -- correctly. Anything
+        # that needs to know a slot is actually available has to wait on the release itself, and a
+        # sleep would only turn a deterministic ordering into a probabilistic one.
+        self._released = threading.Condition()
+        self._release_count = 0
         super().__init__(server_address, request_handler)
+
+    @property
+    def release_count(self) -> int:
+        """How many connection slots have been released since the server started."""
+        with self._released:
+            return self._release_count
+
+    def wait_for_release(self, *, at_least: int, timeout: float) -> bool:
+        """Block until ``release_count`` reaches ``at_least``. False on timeout.
+
+        ``timeout`` bounds the wait so a broken server fails the caller instead of hanging; it is
+        not what the caller is waiting ON, which is the release itself.
+        """
+        deadline = time.monotonic() + timeout
+        with self._released:
+            while self._release_count < at_least:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._released.wait(remaining)
+            return True
+
+    def _note_release(self) -> None:
+        with self._released:
+            self._release_count += 1
+            self._released.notify_all()
 
     def get_request(self) -> tuple[socket.socket, object]:
         request, client_address = super().get_request()
@@ -65,6 +102,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             super().process_request(request, client_address)
         except BaseException:
             self._connection_slots.release()
+            self._note_release()
             raise
 
     def process_request_thread(self, request: socket.socket, client_address: object) -> None:
@@ -72,6 +110,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._connection_slots.release()
+            self._note_release()
 
     def _reject_overloaded(self, request: socket.socket) -> None:
         try:

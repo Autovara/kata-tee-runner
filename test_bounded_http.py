@@ -57,11 +57,95 @@ def test_slow_connections_have_a_deadline_and_cannot_create_unbounded_threads():
     assert b'{"error":"server is at capacity"}' in overloaded
 
     # The incomplete request is evicted by the read deadline and releases its only slot.
+    #
+    # Waiting on the RELEASE, not on the socket close. The two are not the same event and their
+    # order is fixed the wrong way round: the socket is closed inside process_request_thread and
+    # the slot is released in that method's `finally`, strictly afterwards. So `recv() == b""` is
+    # guaranteed to be observable BEFORE the slot is free, and a request sent on that signal can
+    # legitimately be refused. That is the race this test used to lose intermittently.
+    #
+    # Exactly ONE release is expected: the evicted connection. The 503 above released nothing,
+    # because `process_request` refuses before acquiring a slot -- which is the whole point of
+    # rejecting at admission rather than after.
     stalled.settimeout(2)
     assert stalled.recv(4096) == b""
+    assert server.wait_for_release(at_least=1, timeout=2), (
+        f"the evicted connection never released its slot; release_count={server.release_count}"
+    )
     assert b"200 OK" in _request(port)
 
     stalled.close()
     server.shutdown()
     server.server_close()
     thread.join(timeout=2)
+
+
+# ---- the release signal itself ---
+#
+# `wait_for_release` exists so a caller can wait on a connection slot actually becoming free. It is
+# observability only, but a test that waits on a broken signal is worse than one that sleeps: it
+# looks deterministic and is not. So the signal gets its own coverage.
+
+
+def _serve(**kwargs):
+    server = BoundedThreadingHTTPServer(("127.0.0.1", 0), _Handler, **kwargs)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, server.server_address[1]
+
+
+def _stop(server, thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+
+
+def test_a_fresh_server_has_released_nothing():
+    server, thread, _ = _serve(max_connections=1)
+    try:
+        assert server.release_count == 0
+    finally:
+        _stop(server, thread)
+
+
+def test_waiting_for_a_release_that_never_comes_reports_failure():
+    """It must return False rather than block forever, or a broken server hangs its caller instead
+    of failing it."""
+    server, thread, _ = _serve(max_connections=1)
+    try:
+        assert server.wait_for_release(at_least=1, timeout=0.2) is False
+    finally:
+        _stop(server, thread)
+
+
+def test_a_served_request_releases_its_slot():
+    server, thread, port = _serve(max_connections=1)
+    try:
+        assert b"200 OK" in _request(port)
+        assert server.wait_for_release(at_least=1, timeout=2)
+        assert server.release_count == 1
+    finally:
+        _stop(server, thread)
+
+
+def test_a_refused_request_releases_nothing():
+    """The 503 path refuses at ADMISSION -- `process_request` returns before acquiring a slot -- so
+    it has nothing to release.
+
+    Pinned because getting this backwards is easy and silent: a caller that expected the rejection
+    to count would wait for a release that can never arrive, and would blame the server.
+    """
+    _Handler.started.clear()
+    server, thread, port = _serve(max_connections=1, connection_timeout_seconds=5)
+    try:
+        stalled = socket.create_connection(("127.0.0.1", port), timeout=2)
+        stalled.sendall(b"GET / HTTP/1.1\r\nHost: room\r\n")
+        assert _Handler.started.wait(timeout=2)
+
+        assert b"503 Service Unavailable" in _request(port)
+        # The refusal is complete, and it released nothing; the stalled connection still holds the
+        # only slot and has not timed out yet.
+        assert server.release_count == 0
+        stalled.close()
+    finally:
+        _stop(server, thread)
