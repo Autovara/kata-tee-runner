@@ -148,7 +148,16 @@ def run():
     try:
         return _run(raw)
     except Exception as exc:  # noqa: BLE001 - surface the real cause
-        return jsonify(error=str(exc), where=traceback.format_exc()[-1500:]), 500
+        # A bare 500 contains no attested candidate result.  Name it explicitly so validators can
+        # distinguish room infrastructure from quote-bound contestant failures.
+        return (
+            jsonify(
+                error=str(exc),
+                error_kind="infrastructure",
+                where=traceback.format_exc()[-1500:],
+            ),
+            500,
+        )
 
 
 def _attested_credential_failure(

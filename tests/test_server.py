@@ -219,6 +219,18 @@ def test_run_fails_closed_when_secret_unconfigured(monkeypatch):
     assert resp.status_code == 503
 
 
+def test_profile_failure_is_identified_as_infrastructure(monkeypatch):
+    def fail_run(**_kwargs):
+        raise RuntimeError("Docker daemon refused the container")
+
+    monkeypatch.setattr(server_module.PROFILE, "run", fail_run)
+    response = post_run({"nonce": "a9" * 16, "project_key": "proj-x"})
+
+    assert response.status_code == 500
+    assert response.get_json()["error_kind"] == "infrastructure"
+    assert "Docker daemon refused" in response.get_json()["error"]
+
+
 # --- the multi-key credential contract ---------------------------------------------------------
 #
 # Merged from test_server_multi_key.py. Splitting the server's tests by CREDENTIAL VERSION put two
