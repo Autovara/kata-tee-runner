@@ -1,27 +1,100 @@
-"""Multi-key sealing: the two shapes must be mutually unreachable, and nothing may leak a key.
-
-The single-key path is deployed and carrying real money. The point of this file is not that the
-new shape works -- it is that adding it did not open a way for one shape to be read as the other,
-and did not put a miner's key anywhere it can be read.
-
-Note the provider names used throughout: ``alpha``/``beta``/``gamma``/``delta``. The base image
-enforces whatever set a profile declares and knows no lane's provider list; using a real lane's
-names here would quietly imply otherwise.
-"""
-
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from room import sealing
+from room.bundle import credential_bundle_binding
 from room.profile import (
     CredentialSpec,
     MinerCredentialSet,
     MinerInferenceCredential,
     credential_spec_for,
 )
+
+
+def _credential(**changes) -> str:
+    payload = {
+        "version": 1,
+        "provider": "openrouter",
+        "api_key": "miner-secret-key",
+        "bundle_binding": "a" * 64,
+    }
+    payload.update(changes)
+    return json.dumps(payload)
+
+
+def test_resolve_miner_credential_is_versioned_and_does_not_echo_key(monkeypatch) -> None:
+    monkeypatch.setattr(sealing, "_decrypt", lambda _sealed: _credential())
+    credential = sealing.resolve_miner_credential("ciphertext")
+    assert credential is not None
+    assert credential.provider == "openrouter"
+    assert credential.api_key == "miner-secret-key"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not json",
+        _credential(provider="Invalid Provider"),
+        _credential(bundle_binding="wrong"),
+        _credential(api_key=""),
+        _credential(unexpected="value"),
+    ],
+)
+def test_resolve_miner_credential_rejects_invalid_descriptors_without_key_leak(
+    monkeypatch, payload
+) -> None:
+    monkeypatch.setattr(sealing, "_decrypt", lambda _sealed: payload)
+    with pytest.raises(RuntimeError) as error:
+        sealing.resolve_miner_credential("ciphertext")
+    assert "miner-secret-key" not in str(error.value)
+
+
+def test_inference_free_submission_has_no_platform_fallback() -> None:
+    assert sealing.resolve_miner_credential(required=False) is None
+    with pytest.raises(RuntimeError, match="no sealed miner credential"):
+        sealing.resolve_miner_credential()
+
+
+def test_credential_binding_ignores_transient_local_artifacts(tmp_path: Path) -> None:
+    bundle = tmp_path / "submission"
+    bundle.mkdir()
+    (bundle / "agent.py").write_text("def agent_main(): pass\n", encoding="utf-8")
+    expected = credential_bundle_binding(bundle)
+
+    cache = bundle / "__pycache__"
+    cache.mkdir()
+    (cache / "agent.cpython-313.pyc").write_bytes(b"compiled-agent")
+    (bundle / "helper.pyo").write_bytes(b"optimized-agent")
+    git_dir = bundle / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    assert credential_bundle_binding(bundle) == expected
+
+
+def test_credential_binding_includes_submission_metadata(tmp_path: Path) -> None:
+    bundle = tmp_path / "submission"
+    bundle.mkdir()
+    (bundle / "agent.py").write_text("def agent_main(): pass\n", encoding="utf-8")
+    (bundle / "submission.json").write_text('{"submission_id":"first"}\n', encoding="utf-8")
+    initial = credential_bundle_binding(bundle)
+
+    (bundle / "submission.json").write_text('{"submission_id":"second"}\n', encoding="utf-8")
+
+    assert credential_bundle_binding(bundle) != initial
+
+
+# --- the multi-key credential contract ------------------------------------------------------
+#
+# Merged from test_sealing_multi.py. Both files tested room-side credential resolution; the
+# split was by credential VERSION, which meant "where are the sealing tests?" had two answers
+# and the version-crossing cases -- a v1 payload offered to a v2 profile and back -- sat in
+# whichever file their author happened to open.
+
 
 SECRET = "miner-secret-key-value-0123456789"
 PROVIDERS = ("alpha", "beta", "gamma", "delta")

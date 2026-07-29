@@ -13,7 +13,7 @@ import pytest
 
 from room import auth
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parents[1]
 
 
 def _with_secret(monkeypatch, secret: str = "s" * 64) -> None:

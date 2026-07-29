@@ -23,5 +23,5 @@ jobs:
             <(tail -n +3 requirements.lock) \
             <(uv export --locked --no-dev --no-hashes --no-emit-project \
               --no-annotate --no-header)
-      - run: uv run --group dev ruff check room test_*.py kata_seal.py
+      - run: uv run --group dev ruff check .
       - run: uv run --group dev pytest -q

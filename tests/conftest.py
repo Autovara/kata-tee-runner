@@ -5,6 +5,12 @@ no subnet."""
 import os
 import sys
 import types
+from pathlib import Path
+
+# The room resolves KATA_TEE_PROFILE by importing the module NAME at run time, so the directory
+# holding `fake_profile` has to be importable. pytest's rootdir insertion happens to do this today;
+# saying it explicitly means the suite does not depend on that behaviour staying true.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 os.environ.setdefault("KATA_TEE_PROFILE", "fake_profile:FakeProfile")
 os.environ.setdefault(
