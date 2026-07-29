@@ -85,7 +85,9 @@ def test_credential_binding_includes_submission_metadata(tmp_path: Path) -> None
     assert credential_bundle_binding(bundle) != initial
 
 
-def test_kata_seal_rejects_a_blank_api_key_before_contacting_the_room(monkeypatch) -> None:
+def test_kata_seal_rejects_a_blank_api_key_before_contacting_the_room(
+    monkeypatch, tmp_path
+) -> None:
     monkeypatch.setenv("TEST_PROVIDER_KEY", "   ")
     monkeypatch.setattr(
         sys,
@@ -98,12 +100,42 @@ def test_kata_seal_rejects_a_blank_api_key_before_contacting_the_room(monkeypatc
             "akashml",
             "--key-env",
             "TEST_PROVIDER_KEY",
+            # A REAL directory. This passed `./submission` when single-key sealing was its own
+            # program, which failed on the blank key only because the bundle was not checked until
+            # later. The merged tool applies the multi-key rule to both contracts -- every local
+            # check before any secret is read -- so a bogus bundle is now reported first, and this
+            # test would have been asserting the argument order rather than the blank-key refusal.
             "--bundle",
-            "./submission",
+            str(tmp_path),
+            # Likewise. Single-key sealing used to load the key -- including PROMPTING for it --
+            # and only then check --measurement. The merged tool validates every argument before
+            # reading any secret, so a miner is no longer asked for a credential and then told
+            # their command was malformed.
+            "--measurement",
+            "a" * 64,
         ],
     )
 
     with pytest.raises(SystemExit, match="must not be empty"):
+        kata_seal.main()
+
+
+def test_kata_seal_checks_the_bundle_before_reading_any_key(monkeypatch) -> None:
+    """No secret is read, and no room contacted, until the arguments are known-good."""
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "miner-key-value-0123456789")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "kata_seal.py",
+            "--room", "https://room.example",
+            "--provider", "akashml",
+            "--key-env", "TEST_PROVIDER_KEY",
+            "--bundle", "./does-not-exist",
+            "--no-verify",
+        ],
+    )
+    with pytest.raises(SystemExit, match="is not a directory"):
         kata_seal.main()
 
 

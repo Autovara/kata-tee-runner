@@ -7,9 +7,13 @@ shows up as an error -- it shows up as a room that still returns 200.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from room import auth
+
+REPO = Path(__file__).resolve().parent
 
 
 def _with_secret(monkeypatch, secret: str = "s" * 64) -> None:
@@ -130,14 +134,35 @@ def test_the_diagnostic_endpoint_still_demands_auth_when_enabled(monkeypatch):
 #     than at the moment the miner sealed it;
 #   * the file took the caller's umask instead of 0600.
 #
-# `kata_seal_multi.py` already did it correctly. The two tools now share one writer, so the
-# behaviour cannot diverge again -- which is the point of sharing it rather than copying the fix.
+# The multi-key tool already did it correctly, and for a while the two shared one writer so the
+# behaviour could not diverge again. There is now ONE tool, which is a stronger form of the same
+# guarantee: the two contracts cannot drift apart because they are not two programs.
 
-def test_both_sealing_tools_use_the_same_writer():
+def test_there_is_exactly_one_sealing_cli():
+    """Guards the merge itself.
+
+    `kata_seal.py` and `kata_seal_multi.py` were separate programs handling version 1 and version 2
+    of the sealed credential. They shared their crypto by import but each had its own argument
+    parser, so a fix to one flag reached one contract. Re-adding a second entry point would
+    reintroduce exactly that.
+    """
+    scripts = sorted(path.name for path in REPO.glob("kata_seal*.py"))
+    assert scripts == ["kata_seal.py"], scripts
+
+
+def test_the_single_cli_seals_both_credential_versions():
+    """The merge must not have quietly dropped a contract."""
     import kata_seal
-    import kata_seal_multi
 
-    assert kata_seal_multi.write_atomically is kata_seal.write_atomically
+    assert kata_seal.CREDENTIAL_VERSION_SINGLE == 1
+    assert kata_seal.CREDENTIAL_VERSION_MULTI == 2
+    flags = {
+        option
+        for action in kata_seal.build_parser()._actions
+        for option in action.option_strings
+    }
+    for required in ("--provider", "--providers", "--credential-profile", "--key-env"):
+        assert required in flags, f"the merged CLI lost {required}"
 
 
 def test_a_sealed_credential_is_written_owner_only(tmp_path):

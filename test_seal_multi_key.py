@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import kata_seal
-import kata_seal_multi as sealer
+import kata_seal as sealer
 
 PROVIDERS = ("alpha", "beta", "gamma", "delta")
 KEY = "miner-secret-key-value-0123456789"
@@ -31,7 +31,7 @@ def _argv(monkeypatch, *extra: str) -> None:
         sys,
         "argv",
         [
-            "kata_seal_multi.py",
+            "kata_seal.py",
             "--room",
             "https://room.example",
             "--credential-profile",
@@ -207,7 +207,7 @@ def test_an_incomplete_set_is_rejected_before_contacting_the_room(
         sys,
         "argv",
         [
-            "kata_seal_multi.py",
+            "kata_seal.py",
             "--room",
             "https://room.example",
             "--credential-profile",
@@ -231,7 +231,7 @@ def test_a_missing_bundle_directory_is_rejected(monkeypatch, tmp_path: Path) -> 
         sys,
         "argv",
         [
-            "kata_seal_multi.py",
+            "kata_seal.py",
             "--room",
             "https://room.example",
             "--credential-profile",
@@ -283,7 +283,7 @@ def test_the_sealed_payload_is_exactly_what_the_room_accepts(
         sys,
         "argv",
         [
-            "kata_seal_multi.py",
+            "kata_seal.py",
             "--room",
             "https://room.example",
             "--credential-profile",
@@ -336,3 +336,75 @@ def test_the_written_ciphertext_is_excluded_from_its_own_binding(tmp_path: Path)
 
     (bundle / "agent.py").write_text("def agent_main(): exfiltrate()\n", encoding="utf-8")
     assert credential_bundle_binding(bundle) != before
+
+
+# --- one tool, two contracts: choosing between them ----------------------------------------------
+#
+# Single-key and multi-key sealing used to be two programs. Merging them removed a whole class of
+# drift -- one parser, one set of flags -- and introduced exactly one new risk: picking the wrong
+# contract. The room dispatches on the sealed payload's version, so a version-1 credential where the
+# lane wants version 2 is refused mid-duel, and a credential failure scores zero. The mode is
+# therefore never inferred, and every way of getting it wrong is diagnosed by name.
+
+
+def _run(monkeypatch, argv: list[str]):
+    monkeypatch.setattr(sys, "argv", ["kata_seal.py", *argv])
+    return kata_seal.main
+
+
+def test_naming_no_contract_is_refused(monkeypatch, tmp_path: Path) -> None:
+    """Not defaulting to either. A default here is a silent choice of credential format."""
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, ["--room", "https://r.example", "--bundle", str(tmp_path)])()
+
+
+def test_naming_both_contracts_is_refused(monkeypatch, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, [
+            "--room", "https://r.example", "--provider", "alpha",
+            "--providers", "alpha,beta", "--bundle", str(tmp_path),
+        ])()
+
+
+def test_the_multi_key_flag_form_in_single_key_mode_is_diagnosed_by_name(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Left alone this would look up an environment variable literally named
+    'alpha=ALPHA_KEY', find nothing, and report an empty key."""
+    with pytest.raises(SystemExit, match="multi-key form"):
+        _run(monkeypatch, [
+            "--room", "https://r.example", "--provider", "alpha",
+            "--key-env", "alpha=ALPHA_KEY",
+            "--bundle", str(tmp_path), "--measurement", "a" * 64,
+        ])()
+
+
+def test_the_bare_flag_form_in_multi_key_mode_is_diagnosed(monkeypatch, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="provider=value"):
+        _run(monkeypatch, [
+            "--room", "https://r.example", "--providers", "alpha,beta",
+            "--credential-profile", "p", "--key-env", "ALPHA_KEY",
+            "--bundle", str(tmp_path), "--measurement", "a" * 64,
+        ])()
+
+
+def test_a_credential_profile_in_single_key_mode_is_refused(monkeypatch, tmp_path: Path) -> None:
+    """It has no place in a version-1 payload, so accepting and ignoring it would let a miner
+    believe they had sealed the multi-key contract."""
+    with pytest.raises(SystemExit, match="belongs to multi-key mode"):
+        _run(monkeypatch, [
+            "--room", "https://r.example", "--provider", "alpha",
+            "--credential-profile", "p",
+            "--bundle", str(tmp_path), "--measurement", "a" * 64,
+        ])()
+
+
+def test_repeating_a_key_flag_in_single_key_mode_is_refused(monkeypatch, tmp_path: Path) -> None:
+    """The flag is repeatable for the multi-key contract; silently taking the last one in
+    single-key mode would seal a key the miner did not choose."""
+    with pytest.raises(SystemExit, match="once in single-key mode"):
+        _run(monkeypatch, [
+            "--room", "https://r.example", "--provider", "alpha",
+            "--key-env", "A_KEY", "--key-env", "B_KEY",
+            "--bundle", str(tmp_path), "--measurement", "a" * 64,
+        ])()
