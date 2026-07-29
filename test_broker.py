@@ -11,6 +11,7 @@ whatever set a profile declares and knows no lane's providers.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -21,6 +22,7 @@ from room.broker import (
     CAPABILITY_HEADER,
     CAPABILITY_RE,
     DENIED,
+    MAX_REQUEST_BYTES,
     ROLE_AGENT,
     ROLE_EVALUATOR,
     Broker,
@@ -382,8 +384,33 @@ def test_nothing_else_exists_on_the_http_surface(served, agent):
 
 
 def test_an_oversized_request_is_not_buffered(served, agent):
-    """Bounded on bytes before anything is parsed: decoding a 500 MB document is a denial of service
-    while it is still being decoded."""
-    with pytest.raises(urllib.error.HTTPError) as raised:
-        _call(served, "/v1/op/web-search", agent, {"query": "x" * (512 * 1024)})
-    assert raised.value.code == 403
+    """Bounded on the ANNOUNCED length before a byte is buffered: decoding a 500 MB document is a
+    denial of service while it is still being decoded.
+
+    Sent on a raw socket, announcing an oversized body and then never sending one. That is what
+    makes this a test of *not buffering* rather than of the limit alone -- a server that read the
+    body before checking would block here waiting for bytes that never arrive, and the recv below
+    would time out instead of returning a refusal.
+
+    It also removes a race that failed on CI and passed locally. The previous version used
+    ``urllib`` to POST a real 512 KB body. The server refuses on the header and closes without
+    draining, which is exactly right, so the client was left writing into a closed socket: whether
+    it finished before the RST arrived depended on socket buffer sizes, and on a runner it did not.
+    The failure was ``URLError: [Errno 32] Broken pipe`` -- the correct refusal never read.
+    """
+    host, port = served.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=10) as client:
+        client.sendall(
+            b"POST /v1/op/web-search HTTP/1.1\r\n"
+            b"Host: room\r\n"
+            b"Content-Type: application/json\r\n"
+            + CAPABILITY_HEADER.encode() + b": " + agent.encode() + b"\r\n"
+            + b"Content-Length: " + str(MAX_REQUEST_BYTES * 2).encode() + b"\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        # Deliberately no body.
+        client.settimeout(10)
+        response = b""
+        while chunk := client.recv(4096):
+            response += chunk
+    assert b" 403 " in response.split(b"\r\n", 1)[0], response[:200]
