@@ -10,6 +10,7 @@ import pytest
 
 from room import auth, inference_network
 from room.inference_gateway import (
+    MAX_REQUEST_BYTES,
     GatewayConfigurationError,
     build_server,
     make_job_route_token,
@@ -198,6 +199,25 @@ def test_gateway_rejects_a_missing_miner_key_before_provider_call(gateway_and_pr
     with pytest.raises(HTTPError) as error:
         post(inference_url(base, "akashml"), b"{}")
     assert error.value.code == 401
+    assert provider.records == []
+
+
+def test_gateway_rejects_an_oversized_body_before_reading_or_forwarding(
+    gateway_and_provider,
+) -> None:
+    base, provider = gateway_and_provider
+    request = Request(
+        inference_url(base, "akashml"),
+        data=None,
+        method="POST",
+        headers={
+            "Content-Length": str(MAX_REQUEST_BYTES + 1),
+            "x-inference-api-key": "miner-key",
+        },
+    )
+    with pytest.raises(HTTPError) as error:
+        urlopen(request, timeout=2)
+    assert error.value.code == 413
     assert provider.records == []
 
 

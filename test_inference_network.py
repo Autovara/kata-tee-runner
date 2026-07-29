@@ -45,10 +45,12 @@ def _install_fake_docker(monkeypatch, responder, *, image="ghcr.io/x/runner@sha2
 
 
 def _healthy_responder(*, endpoints="", internal="true", probe_rc=0, image="sha256:runnerimg",
-                       container_names=""):
+                       container_names="", volume_names=""):
     def responder(args):
         if args[:2] == ["ps", "-a"]:  # stale-agent-container cleanup listing
             return _proc(stdout=container_names)
+        if args[:2] == ["volume", "ls"]:
+            return _proc(stdout=volume_names)
         if _is_endpoint_list(args):
             return _proc(stdout=endpoints)
         if _is_internal_check(args):
@@ -66,16 +68,35 @@ def test_stale_agent_containers_removed_but_runner_untouched(monkeypatch):
     names = "\n".join([
         "kata-sn60-ac8715c964e6100011122",   # leftover agent container -> remove
         "kata-sn60-deadbeefdeadbeef0011",    # another leftover -> remove
+        "kata-sn22-cafebabecafebabe0011",    # SN22 uses the same cleanup contract
+        "kata-sn22-cafebabecafebabe0011-stage",
         "dstack-kata-sn60-runner-1",         # the RUNNER -> must NOT be removed
+        "dstack-kata-sn22-runner-1",
         "some-other-container",
     ])
-    calls = _install_fake_docker(monkeypatch, _healthy_responder(container_names=names))
+    volumes = "\n".join([
+        "kata-sn22-cafebabecafebabe0011-bundle",
+        "kata-sn60-deadbeefdeadbeef0011-output",
+        "unrelated-volume",
+    ])
+    calls = _install_fake_docker(
+        monkeypatch,
+        _healthy_responder(container_names=names, volume_names=volumes),
+    )
     inf.ensure_inference_network_once()
     removed = [a[-1] for a in calls if a[:2] == ["rm", "-f"]]
     assert "kata-sn60-ac8715c964e6100011122" in removed
     assert "kata-sn60-deadbeefdeadbeef0011" in removed
+    assert "kata-sn22-cafebabecafebabe0011" in removed
+    assert "kata-sn22-cafebabecafebabe0011-stage" in removed
     assert "dstack-kata-sn60-runner-1" not in removed
+    assert "dstack-kata-sn22-runner-1" not in removed
     assert "some-other-container" not in removed
+    removed_volumes = [a[-1] for a in calls if a[:3] == ["volume", "rm", "-f"]]
+    assert removed_volumes == [
+        "kata-sn22-cafebabecafebabe0011-bundle",
+        "kata-sn60-deadbeefdeadbeef0011-output",
+    ]
 
 
 def test_clean_reset_and_reachable_marks_ready(monkeypatch):

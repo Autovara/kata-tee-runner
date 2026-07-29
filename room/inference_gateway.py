@@ -24,18 +24,20 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from room import auth
+from room.bounded_http import BoundedThreadingHTTPServer
 from room.ids import PROVIDER_ID_REGEX
 
 # This is a transport safety limit for one upstream request, not an inference
 # policy. The miner still chooses model, token/call/retry settings and pays the
 # provider. Keep it below the agent and room request deadlines.
 DEFAULT_TIMEOUT_SECONDS = 180
+MAX_REQUEST_BYTES = 1024 * 1024
 
 PROVIDER_ROUTES_ENV = "KATA_INFERENCE_GATEWAY_PROVIDER_ROUTES_JSON"
 TIMEOUT_ENV = "KATA_INFERENCE_GATEWAY_TIMEOUT"
@@ -383,15 +385,20 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
         try:
             job_id, provider = _provider_from_route(parsed.path)
         except GatewayAuthorizationError as error:
-            self._read_body()
             self._send_json(403, {"status": "error", "detail": str(error)})
             return
-        self._forward(job_id, provider)
+        body = self._read_body()
+        if body is None:
+            self._send_json(
+                413,
+                {"status": "error", "detail": "Inference request exceeds the transport limit."},
+            )
+            return
+        self._forward(job_id, provider, body)
 
-    def _forward(self, job_id: str, provider: str) -> None:
+    def _forward(self, job_id: str, provider: str, body: bytes) -> None:
         req = next(_request_counter)
         _log_gateway(f"req#{req} provider={provider} received")
-        body = self._read_body()
         api_key = self.headers.get("x-inference-api-key", "").strip()
         if not api_key:
             _log_gateway(f"req#{req} provider={provider} -> 401 no-miner-key")
@@ -509,18 +516,27 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
             )
         return rendered
 
-    def _read_body(self) -> bytes:
+    def _read_body(self) -> bytes | None:
+        if self.headers.get("Transfer-Encoding"):
+            return None
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) > 1:
+            return None
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = int(lengths[0]) if lengths else 0
         except ValueError:
-            length = 0
+            return None
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            return None
         return self.rfile.read(length) if length > 0 else b""
 
     def _relay_response(self, status: int, header_items, body: bytes) -> None:
+        self.close_connection = True
         self.send_response(status)
         for key, value in header_items:
             if key.lower() not in _SKIP_RESPONSE_HEADERS:
                 self.send_header(key, value)
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
@@ -528,8 +544,10 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict[str, object]) -> None:
         body = json.dumps(payload).encode("utf-8")
+        self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -539,10 +557,8 @@ class MinerInferenceGatewayHandler(BaseHTTPRequestHandler):
         return
 
 
-def build_server(host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), MinerInferenceGatewayHandler)
-    server.daemon_threads = True
-    return server
+def build_server(host: str, port: int) -> BoundedThreadingHTTPServer:
+    return BoundedThreadingHTTPServer((host, port), MinerInferenceGatewayHandler)
 
 
 def main() -> int:

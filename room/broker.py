@@ -37,8 +37,10 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
+
+from room.bounded_http import BoundedThreadingHTTPServer
 
 #: Capability tokens are opaque and fixed-shape, so a parser that accepted anything else would be a
 #: place to smuggle structure into a log line or a path.
@@ -427,22 +429,27 @@ class BrokerHandler(BaseHTTPRequestHandler):
         Bounded on the announced LENGTH before a single byte is buffered: reading 500 MB in order
         to discover it is too large is the denial of service the limit exists to prevent.
         """
+        if self.headers.get("Transfer-Encoding"):
+            return None
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) > 1:
+            return None
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = int(lengths[0]) if lengths else 0
         except ValueError:
-            return b""
+            return None
         if length <= 0:
-            return b""
+            return b"" if length == 0 else None
         if length > MAX_REQUEST_BYTES:
-            # Drain a bounded amount so the connection can be answered rather than reset.
-            self.rfile.read(min(length, MAX_REQUEST_BYTES))
             return None
         return self.rfile.read(length)
 
     def _send(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")[:MAX_RESPONSE_BYTES]
+        self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -453,7 +460,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
         return
 
 
-def build_broker_server(broker: Broker, host: str, port: int) -> ThreadingHTTPServer:
+def build_broker_server(broker: Broker, host: str, port: int) -> BoundedThreadingHTTPServer:
     """An HTTP server bound to ``broker``, ready for ``serve_forever`` on a thread.
 
     In-process rather than a subprocess, and that is the crux of the whole design: the decrypted
@@ -461,6 +468,4 @@ def build_broker_server(broker: Broker, host: str, port: int) -> ThreadingHTTPSe
     them -- which is the very thing being removed.
     """
     handler = type("_BoundBrokerHandler", (BrokerHandler,), {"broker": broker})
-    server = ThreadingHTTPServer((host, port), handler)
-    server.daemon_threads = True
-    return server
+    return BoundedThreadingHTTPServer((host, port), handler)

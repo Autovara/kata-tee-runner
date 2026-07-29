@@ -18,18 +18,24 @@ GHCR = "ghcr.io"
 INF_NET = "kata-inf-net"
 INFERENCE_GATEWAY_ALIAS = "kata-inference-gateway"
 INFERENCE_GATEWAY_PORT = "8000"
-# A per-job agent container is named ``kata-sn60-<hex>`` (see the SN60 tee_profile). The runner
-# container is ``dstack-kata-sn60-runner-1`` and can never match this anchored, hex-only pattern.
-_AGENT_CONTAINER_RE = re.compile(r"^kata-sn60-[0-9a-f]{12,64}$")
+# A per-job agent container is named ``kata-sn60-<hex>`` or ``kata-sn22-<hex>`` by its profile.
+# Runner containers have longer compose-generated names and can never match this anchored pattern.
+_AGENT_CONTAINER_RE = re.compile(r"^kata-(?:sn22|sn60)-[0-9a-f]{12,64}(?:-stage)?$")
+_AGENT_VOLUME_RE = re.compile(
+    r"^kata-(?:sn22|sn60)-[0-9a-f]{12,64}-(?:bundle|output)$"
+)
 
 _logged_in = False
 _gateway_process = None
 _inference_network_ready = False
 
 
-def docker(args, stdin=None, timeout=300):
+def docker(args, stdin=None, timeout=300, *, stdout=None, stderr=None):
+    options = {"stdout": stdout, "stderr": stderr}
+    if stdout is None and stderr is None:
+        options = {"capture_output": True}
     return subprocess.run(
-        ["docker", *args], input=stdin, capture_output=True, text=True, timeout=timeout
+        ["docker", *args], input=stdin, text=True, timeout=timeout, **options
     )
 
 
@@ -101,14 +107,13 @@ def _network_endpoint_ids(name: str) -> list[str]:
 
 
 def cleanup_stale_agent_containers() -> None:
-    """Remove leftover per-job agent containers (``kata-sn60-<hex>``) from crashed/interrupted runs.
+    """Remove leftover per-job agent containers and volumes from interrupted runs.
 
-    The SN60 profile removes each agent container in its ``finally``, but a room crash between
-    ``create`` and cleanup leaves one behind, and stopped ones accumulate on the persistent daemon
-    across runner restarts (a lingering one can also keep a stale ``kata-inf-net`` endpoint). This
-    runs at runner start, when no agent is running. The runner container itself
-    (``dstack-kata-sn60-runner-1``) never matches the anchored hex-only agent pattern, so it is
-    never touched.
+    The SN60 and SN22 profiles remove each agent container in ``finally``, but a room crash between
+    ``create`` and cleanup can leave one behind. Stopped ones otherwise accumulate on the persistent
+    daemon across runner restarts, and a lingering one can keep a stale ``kata-inf-net`` endpoint.
+    This runs at runner start, when no agent is running. Runner containers never match the anchored,
+    hex-only agent pattern, so they are never touched.
     """
     listed = docker(["ps", "-a", "--format", "{{.Names}}"])
     if listed.returncode != 0:
@@ -116,6 +121,12 @@ def cleanup_stale_agent_containers() -> None:
     for name in listed.stdout.split():
         if _AGENT_CONTAINER_RE.fullmatch(name.strip()):
             docker(["rm", "-f", name.strip()])  # best effort
+    volumes = docker(["volume", "ls", "--format", "{{.Name}}"])
+    if volumes.returncode != 0:
+        return
+    for name in volumes.stdout.split():
+        if _AGENT_VOLUME_RE.fullmatch(name.strip()):
+            docker(["volume", "rm", "-f", name.strip()])  # best effort
 
 
 def _reset_inference_network() -> None:
