@@ -252,19 +252,6 @@ def start_broker_once(broker):
     return _broker_server
 
 
-def stop_broker():
-    """Shut the broker's listener down. Used at batch completion and by tests."""
-    global _broker_server, _broker_thread, _broker_network_ready
-    if _broker_server is not None:
-        _broker_server.shutdown()
-        _broker_server.server_close()
-        _broker_server = None
-    if _broker_thread is not None:
-        _broker_thread.join(timeout=10)
-        _broker_thread = None
-    _broker_network_ready = False
-
-
 def broker_url() -> str:
     """The base URL an agent is given. A host and a port -- the agent appends nothing but an
     operation NAME, and the broker refuses any name it does not recognise."""
