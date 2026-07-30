@@ -162,16 +162,18 @@ class MyProfile:
     credential_version = 2
     required_providers = ("provider-a", "provider-b")
     credential_profile = "my-lane-funding-policy-v1"
+    credential_failure_mode = "attested_zero"
 ```
 
 Dispatch is on what the **profile** declares, never on what a payload claims, so a single-key room
 will not spend a multi-key payload and a multi-key room will not accept a single key.
 
-Under a multi-key contract the room answers a credential fault with a **quote-bound
-`credential_failure` report** rather than an HTTP error. Where a miner funds their own evaluation, a
-credential fault scores them zero — and a bare 4xx is not evidence, since anything on the path could
-have produced it. Under the single-key contract the lane funds inference, a credential fault is the
-operator's problem rather than a contestant's, and a plain 400 is the honest answer.
+Credential payload shape and credential ownership are separate. Set
+`credential_failure_mode = "attested_zero"` when each participant supplies its own key. The room
+then answers an absent, unreadable, or bundle-mismatched credential with a quote-bound
+`credential_failure` report, which the lane can safely score as zero. A bare 4xx is not evidence,
+since anything on the path could have produced it. Leave the setting unset for operator-owned
+credentials; their failure remains an infrastructure error.
 
 ## The trusted broker (multi-key lanes)
 

@@ -304,7 +304,11 @@ class _Profile:
 def test_a_profile_that_declares_nothing_gets_the_single_key_contract() -> None:
     """Every profile predating this lives in another repository and declares nothing. Silently
     re-reading their payloads under a new schema is exactly what the versioning prevents."""
-    assert credential_spec_for(_Profile()).version == 1
+    from room.profile import CREDENTIAL_FAILURE_HTTP_ERROR
+
+    spec = credential_spec_for(_Profile())
+    assert spec.version == 1
+    assert spec.credential_failure_mode == CREDENTIAL_FAILURE_HTTP_ERROR
 
 
 @pytest.mark.parametrize(
@@ -321,6 +325,7 @@ def test_a_profile_that_declares_nothing_gets_the_single_key_contract() -> None:
             "duplicate provider",
         ),
         ({"credential_version": 3}, "unsupported credential_version"),
+        ({"credential_failure_mode": "score_everyone_full_marks"}, "credential_failure_mode"),
     ],
 )
 def test_an_incoherent_profile_declaration_fails_at_load(attributes, expected: str) -> None:
@@ -331,6 +336,8 @@ def test_an_incoherent_profile_declaration_fails_at_load(attributes, expected: s
 
 
 def test_a_well_formed_multi_key_declaration_is_accepted() -> None:
+    from room.profile import CREDENTIAL_FAILURE_ATTESTED_ZERO
+
     spec = credential_spec_for(
         _Profile(
             credential_version=2,
@@ -340,3 +347,14 @@ def test_a_well_formed_multi_key_declaration_is_accepted() -> None:
     )
     assert spec.version == 2
     assert spec.required_providers == PROVIDERS  # the SPEC keeps the declared order
+    assert spec.credential_failure_mode == CREDENTIAL_FAILURE_ATTESTED_ZERO
+
+
+def test_a_single_key_profile_can_declare_participant_owned_credentials() -> None:
+    from room.profile import CREDENTIAL_FAILURE_ATTESTED_ZERO
+
+    spec = credential_spec_for(
+        _Profile(credential_failure_mode=CREDENTIAL_FAILURE_ATTESTED_ZERO)
+    )
+    assert spec.version == 1
+    assert spec.credential_failure_mode == CREDENTIAL_FAILURE_ATTESTED_ZERO

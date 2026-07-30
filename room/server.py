@@ -43,7 +43,7 @@ from room.dstack import get_client
 from room.inference_gateway import summarize_job_inference
 from room.inference_network import docker, ghcr_login
 from room.profile import (
-    CREDENTIAL_VERSION_MULTI_KEY,
+    CREDENTIAL_FAILURE_ATTESTED_ZERO,
     TeeJobResult,
     credential_spec_for,
 )
@@ -74,10 +74,10 @@ PROFILE = load_profile()
 #: when the room boots rather than on the first duel it is asked to judge.
 CREDENTIAL_SPEC = credential_spec_for(PROFILE)
 
-#: A credential fault is the contestant's own -- under a miner-funded policy it scores them zero --
-#: so the room must return *evidence* of it, not an HTTP error.  A bare 4xx could be produced by
-#: anything on the path, including a host that would rather one side lost; a quote-bound report
-#: cannot.  These are the reason codes that envelope carries.
+#: When the profile declares participant-owned credentials, a credential fault scores that
+#: participant zero, so the room must return *evidence* of it rather than an HTTP error. A bare 4xx
+#: could be produced by anything on the path, including a host that would rather one side lost; a
+#: quote-bound report cannot. These are the reason codes that envelope carries.
 CREDENTIAL_FAILURE_STATUS = "credential_failure"
 CREDENTIAL_REASON_ABSENT = "absent"
 CREDENTIAL_REASON_UNREADABLE = "unreadable"
@@ -227,16 +227,18 @@ def _run(raw: bytes):
     ):
         return jsonify(error="nonce already used"), 409
 
-    multi_key = CREDENTIAL_SPEC.version == CREDENTIAL_VERSION_MULTI_KEY
+    attest_credential_failure = (
+        CREDENTIAL_SPEC.credential_failure_mode == CREDENTIAL_FAILURE_ATTESTED_ZERO
+    )
     try:
         credential = sealing.resolve_sealed_credential(
             sealed_key, spec=CREDENTIAL_SPEC, required=False
         )
     except RuntimeError as exc:
-        # Under a miner-funded policy this zeroes the contestant, so it has to be attested. Under
-        # the single-key policy the lane funds inference, a credential fault is the operator's
-        # problem rather than a contestant's, and a plain 400 is the honest answer.
-        if multi_key:
+        # Participant-owned credentials produce an attested zero. Operator-owned credentials
+        # produce a plain error because their failure is room infrastructure, not contestant
+        # evidence. Payload version does not decide ownership.
+        if attest_credential_failure:
             return _attested_credential_failure(
                 nonce=nonce,
                 nonce_hex=nonce_hex,
@@ -248,15 +250,15 @@ def _run(raw: bytes):
         return jsonify(error=str(exc)), 400
     if credential is not None and not bundle_b64:
         return jsonify(error="a sealed miner credential requires a candidate bundle"), 400
-    if multi_key and credential is None and bundle_b64:
-        # A miner-funded run with nothing to fund it. Attested for the same reason as above.
+    if attest_credential_failure and credential is None and bundle_b64:
+        # A participant-funded run with nothing to fund it. Attested for the same reason as above.
         return _attested_credential_failure(
             nonce=nonce,
             nonce_hex=nonce_hex,
             project_key=project_key,
             bundle_sha256=bundle_sha256,
             reason=CREDENTIAL_REASON_ABSENT,
-            detail="this room requires a sealed miner credential set for every scored run",
+            detail="this room requires a sealed miner credential for every scored run",
         )
 
     with tempfile.TemporaryDirectory() as directory:
@@ -276,7 +278,7 @@ def _run(raw: bytes):
             if credential is not None and not hmac.compare_digest(
                 credential.bundle_binding, actual_binding
             ):
-                if multi_key:
+                if attest_credential_failure:
                     return _attested_credential_failure(
                         nonce=nonce,
                         nonce_hex=nonce_hex,

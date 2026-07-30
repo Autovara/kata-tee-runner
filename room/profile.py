@@ -116,6 +116,15 @@ class MinerCredentialSet:
 CREDENTIAL_VERSION_SINGLE_KEY = 1
 CREDENTIAL_VERSION_MULTI_KEY = 2
 
+#: What the generic room does when it cannot use a sealed credential. Credential payload shape
+#: (single-key versus multi-key) and who owns the credential are independent decisions: SN60 uses
+#: one miner-funded key, while an older single-key profile may still use an operator-funded key.
+CREDENTIAL_FAILURE_HTTP_ERROR = "http_error"
+CREDENTIAL_FAILURE_ATTESTED_ZERO = "attested_zero"
+_CREDENTIAL_FAILURE_MODES = frozenset(
+    {CREDENTIAL_FAILURE_HTTP_ERROR, CREDENTIAL_FAILURE_ATTESTED_ZERO}
+)
+
 
 @dataclass(frozen=True)
 class CredentialSpec:
@@ -131,6 +140,10 @@ class CredentialSpec:
     #: Empty for version 1, whose payload names a single provider the gateway routes on instead.
     required_providers: tuple = ()
     credential_profile: str = ""
+    #: ``attested_zero`` means the contestant supplied and owns the key, so an absent, unreadable,
+    #: or bundle-mismatched credential is returned as quote-bound evidence that scores that side
+    #: zero. ``http_error`` means the key is operator-owned, so the same fault is infrastructure.
+    credential_failure_mode: str = CREDENTIAL_FAILURE_HTTP_ERROR
 
 
 def credential_spec_for(profile) -> CredentialSpec:
@@ -140,8 +153,23 @@ def credential_spec_for(profile) -> CredentialSpec:
     other repositories and predate this -- keep working untouched.
     """
     version = int(getattr(profile, "credential_version", CREDENTIAL_VERSION_SINGLE_KEY))
+    # Preserve the existing multi-key contract (all current multi-key profiles are contestant
+    # funded), while allowing a single-key profile such as SN60 to declare the same ownership.
+    default_failure_mode = (
+        CREDENTIAL_FAILURE_ATTESTED_ZERO
+        if version == CREDENTIAL_VERSION_MULTI_KEY
+        else CREDENTIAL_FAILURE_HTTP_ERROR
+    )
+    failure_mode = str(
+        getattr(profile, "credential_failure_mode", default_failure_mode) or ""
+    )
+    if failure_mode not in _CREDENTIAL_FAILURE_MODES:
+        raise RuntimeError(
+            "profile declares unsupported credential_failure_mode "
+            f"{failure_mode!r}; expected one of {sorted(_CREDENTIAL_FAILURE_MODES)!r}"
+        )
     if version == CREDENTIAL_VERSION_SINGLE_KEY:
-        return CredentialSpec(version=version)
+        return CredentialSpec(version=version, credential_failure_mode=failure_mode)
     if version != CREDENTIAL_VERSION_MULTI_KEY:
         raise RuntimeError(f"profile declares unsupported credential_version {version!r}")
 
@@ -163,6 +191,7 @@ def credential_spec_for(profile) -> CredentialSpec:
         version=version,
         required_providers=providers,
         credential_profile=credential_profile,
+        credential_failure_mode=failure_mode,
     )
 
 
@@ -175,6 +204,7 @@ class TeeJobProfile(Protocol):
     credential_version: int
     required_providers: tuple
     credential_profile: str
+    credential_failure_mode: str
 
     def run(
         self,

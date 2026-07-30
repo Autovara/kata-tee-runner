@@ -16,7 +16,12 @@ from room import auth, sealing
 from room import server as server_module
 from room.attest import bind_and_quote, binding_payload, canonical
 from room.bundle import credential_bundle_binding
-from room.profile import MinerCredentialSet, MinerInferenceCredential, credential_spec_for
+from room.profile import (
+    CREDENTIAL_FAILURE_ATTESTED_ZERO,
+    MinerCredentialSet,
+    MinerInferenceCredential,
+    credential_spec_for,
+)
 from room.server import CREDENTIAL_SPEC, PROFILE, app
 
 
@@ -255,7 +260,16 @@ def multi_key(monkeypatch):
     return profile
 
 
+@pytest.fixture
+def participant_funded_single_key(monkeypatch):
+    """Single-key payload shape with contestant-owned failure semantics (the SN60 contract)."""
 
+    class _Profile:
+        credential_failure_mode = CREDENTIAL_FAILURE_ATTESTED_ZERO
+
+    profile = _Profile()
+    monkeypatch.setattr(server_module, "CREDENTIAL_SPEC", credential_spec_for(profile))
+    return profile
 
 
 def _credential_set(binding: str) -> MinerCredentialSet:
@@ -353,6 +367,29 @@ def test_an_unreadable_credential_returns_an_attested_failure(
     _assert_is_attested_failure(response.get_json(), reason="unreadable")
 
 
+def test_a_participant_funded_single_key_failure_is_also_attested(
+    participant_funded_single_key, monkeypatch, tmp_path
+) -> None:
+    """Ownership, not payload version, decides whether a bad key is a contestant zero."""
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("sealed miner credential could not be decrypted")
+
+    monkeypatch.setattr(sealing, "resolve_sealed_credential", _raise)
+    files = {"agent.py": "safe agent\n"}
+    response = post_run(
+        {
+            "nonce": "d1" * 16,
+            "project_key": "proj-x",
+            "sealed_key": "garbage",
+            "bundle": bundle_b64(files),
+            "bundle_sha256": bundle_binding(tmp_path, files),
+        }
+    )
+    assert response.status_code == 200
+    _assert_is_attested_failure(response.get_json(), reason="unreadable")
+
+
 def test_a_missing_credential_returns_an_attested_failure(
     multi_key, monkeypatch, tmp_path
 ) -> None:
@@ -432,11 +469,14 @@ def test_a_wrong_bundle_digest_is_still_a_plain_error(multi_key, monkeypatch, tm
     assert "does not match" in response.get_json()["error"]
 
 
-# ---- the single-key policy is unchanged ----------------------------------------------------------
+# ---- operator-funded credentials still fail as infrastructure -----------------------------------
 
-def test_a_single_key_profile_still_returns_a_plain_error(monkeypatch, tmp_path) -> None:
-    """No `multi_key` fixture: the default single-key profile is loaded. There the lane funds
-    inference, so a credential fault is the operator's problem and a 400 is the honest answer."""
+
+def test_an_operator_funded_single_key_profile_returns_a_plain_error(
+    monkeypatch, tmp_path
+) -> None:
+    """The default legacy profile does not assign credential faults to a contestant."""
+
     def _raise(*_args, **_kwargs):
         raise RuntimeError("sealed miner credential could not be decrypted")
 
