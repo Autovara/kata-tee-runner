@@ -73,6 +73,25 @@ CREDENTIAL_VERSION_MULTI = 2
 
 _PROVIDER_PATTERN = re.compile(PROVIDER_ID_REGEX + r"\Z")
 
+#: TCB states in which a room is safe to seal to: fully patched, or patched but wanting software
+#: hardening for which no advisory applies here. Everything else -- CONFIGURATION_NEEDED,
+#: OUT_OF_DATE, REVOKED and their combinations -- stays refused.
+#:
+#: Each state is listed in BOTH spellings, and that is the whole point of this set rather than a
+#: literal. ``dcap-qvl`` ships a type stub documenting ``OK``/``SW_HARDENING_NEEDED``, but the
+#: compiled extension in the pinned 0.5.3 returns Intel's raw TCB names ``UpToDate``/
+#: ``SWHardeningNeeded``. The two vocabularies do not intersect, so a check written from the stub
+#: refuses every genuinely healthy room -- which is exactly what shipped: from 2026-07-28, when this
+#: verification was added, until this fix, NO miner could seal a key at all, against a room that was
+#: attesting perfectly (``UpToDate`` with an empty advisory list).
+#:
+#: Both spellings are kept because the mismatch is the library's, not ours, and a future release
+#: correcting its own extension to match its own stub must not break sealing a second time.
+HEALTHY_TCB_STATUSES = frozenset({
+    "OK", "SW_HARDENING_NEEDED",        # as documented in dcap_qvl's .pyi stub
+    "UpToDate", "SWHardeningNeeded",    # as actually returned by the compiled dcap-qvl 0.5.3
+})
+
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
@@ -139,7 +158,7 @@ def verify_room(
         return v
 
     status = getattr(asyncio.run(_v()), "status", "")
-    if status not in ("OK", "SW_HARDENING_NEEDED"):
+    if status not in HEALTHY_TCB_STATUSES:
         raise SystemExit(f"ERROR: room attestation is not valid (status={status}). Not sealing.")
     if measurement != expected_measurement:
         raise SystemExit(

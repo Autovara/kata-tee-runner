@@ -583,3 +583,74 @@ def test_kata_seal_accepts_only_a_bound_approved_current_tdx_quote(monkeypatch) 
         "aa" * 32,
         "SW_HARDENING_NEEDED",
     )
+
+
+def _fake_qvl_reporting(status: str, pubkey: str):
+    """A dcap_qvl stand-in whose verification reports ``status`` for an otherwise perfect quote."""
+    binding = kata_seal.hashlib.sha256(
+        b"kata-sealing-pubkey:" + bytes.fromhex(pubkey)
+    ).digest()
+    parsed = SimpleNamespace(
+        report=SimpleNamespace(
+            mr_config_id=b"\x01" + b"\xaa" * 32,
+            report_data=binding + b"\x00" * 32,
+        ),
+        is_tdx=lambda: True,
+    )
+
+    async def collateral(_url, _raw):
+        return object()
+
+    return SimpleNamespace(
+        PHALA_PCCS_URL="https://pccs.example",
+        parse_quote=lambda _raw: parsed,
+        get_collateral=collateral,
+        verify=lambda _raw, _collateral, _now: SimpleNamespace(status=status),
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "OK", "SW_HARDENING_NEEDED",       # dcap_qvl's documented .pyi vocabulary
+        "UpToDate", "SWHardeningNeeded",   # what the compiled dcap-qvl 0.5.3 really returns
+    ],
+)
+def test_a_healthy_room_seals_in_EITHER_status_vocabulary(monkeypatch, status: str) -> None:
+    """The library's stub and its compiled extension disagree, and only one of them was honoured.
+
+    The check was written from the ``.pyi`` stub (``OK``/``SW_HARDENING_NEEDED``) while the pinned
+    0.5.3 extension returns Intel's raw TCB names (``UpToDate``/``SWHardeningNeeded``). Those sets
+    do not intersect, so from 2026-07-28 every miner was refused by a room attesting perfectly --
+    ``UpToDate`` with an empty advisory list. Both spellings are pinned here so neither the current
+    behaviour nor a future release that fixes its own extension can break sealing again.
+    """
+    pubkey = "02" + "11" * 32
+    monkeypatch.setitem(sys.modules, "dcap_qvl", _fake_qvl_reporting(status, pubkey))
+    assert kata_seal.verify_room("00", pubkey, "aa" * 32) == ("aa" * 32, status)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "CONFIGURATION_NEEDED", "ConfigurationNeeded",
+        "OUT_OF_DATE", "OutOfDate",
+        "REVOKED", "Revoked",
+        "ConfigurationAndSWHardeningNeeded",
+        "OutOfDateConfigurationNeeded",
+        "", "ok", "uptodate",   # empty/miscased must not slip through either
+    ],
+)
+def test_an_UNHEALTHY_room_is_still_refused_in_either_vocabulary(
+    monkeypatch, status: str
+) -> None:
+    """Widening the gate must have admitted exactly two states, not weakened it.
+
+    This is the assertion that makes the fix safe: an out-of-date, misconfigured or revoked platform
+    stays refused under both naming schemes, and the match is exact rather than case-insensitive or
+    substring-based.
+    """
+    pubkey = "02" + "11" * 32
+    monkeypatch.setitem(sys.modules, "dcap_qvl", _fake_qvl_reporting(status, pubkey))
+    with pytest.raises(SystemExit, match="attestation is not valid"):
+        kata_seal.verify_room("00", pubkey, "aa" * 32)
